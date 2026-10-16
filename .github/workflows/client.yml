@@ -331,15 +331,16 @@ jobs:
           unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP/sdkx"
           echo "archive top level:"; find "$RUNNER_TEMP/sdkx" -maxdepth 2 -type d | head -20
 
-          ROOT="$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name openharmony -print -quit)"
-          ROOT="$(dirname "$(dirname "$ROOT")")"   # .../sdk/default
-          [ -n "$ROOT" ] && [ -d "$ROOT" ] || {
-            echo "could not locate sdk/default in the archive" >&2
-            find "$RUNNER_TEMP/sdkx" -maxdepth 4 -type d | head -40 >&2
-            exit 1
-          }
-          echo "sdk root: $ROOT"
+          # The archive's top level is command-line-tools/, holding
+          # bin/ ohpm/ hvigor/ tool/ and sdk/. There is no extra "default"
+          # level here, so take the directory that *contains* bin/ as the root.
+          CAND="$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name bin -print -quit)"
+          [ -n "$CAND" ] || { echo "no bin/ in the archive" >&2; find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d >&2; exit 1; }
+          ROOT="$(dirname "$CAND")"
+          echo "tools root: $ROOT"
+          ls -la "$ROOT"
           cp -r "$ROOT"/. "$SDK_BASE"/
+          echo "--- \$SDK_BASE after copy ---"; ls -la "$SDK_BASE"
           # chmod the toolchains, as the app's CI does — the archive does not
           # always carry the executable bit through a zip round-trip.
           chmod +x "$SDK_BASE"/openharmony/native/build-tools/cmake/bin/* 2>/dev/null || true
@@ -347,7 +348,12 @@ jobs:
           chmod +x "$SDK_BASE"/hms/native/build-tools/cmake/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/hms/native/llvm/bin/* 2>/dev/null || true
 
-          SDK_HOME="$SDK_BASE/sdk/default"
+          # sdk/ may or may not have a "default" level depending on the package.
+          SDK_HOME="$SDK_BASE/sdk"
+          if [ -d "$SDK_BASE/sdk/default/openharmony" ]; then
+            SDK_HOME="$SDK_BASE/sdk/default"
+          fi
+          echo "SDK_HOME=$SDK_HOME"; ls -la "$SDK_HOME" 2>/dev/null | head
           {
             echo "DEVECO_SDK_HOME=$SDK_HOME"
             echo "OHOS_HVIGOR_SDK_ROOT=$SDK_HOME"
