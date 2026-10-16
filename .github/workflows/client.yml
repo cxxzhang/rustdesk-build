@@ -309,50 +309,47 @@ jobs:
           git -C src/harmonyos log --oneline -1
       - name: Install HarmonyOS SDK
         env:
-          # Huawei's SDK archive is ~2.3 GB, over GitHub's 2 GiB release-asset
-          # limit, so it cannot be mirrored here. The signed download URL
-          # (valid ~10 years) lives in a secret: the runner fetches straight
-          # from Huawei and nothing is re-hosted.
+          # The SDK is ~2.3 GB, over GitHub's 2 GiB release-asset limit, so it
+          # lives in a GitCode repo split into 99 MB volumes (GitCode caps a
+          # single file at 100 MB). Reassembled here and unpacked.
           #
-          # The layout the build expects, taken from the app's own CI:
-          #   $SDK_BASE/{bin,ohpm,hvigor,tool}
-          #   $SDK_BASE/sdk/default/{openharmony,hms}     <- native SDK lives here
-          SDK_URL: ${{ secrets.HARMONYOS_SDK_URL }}
+          # The toolchain binaries are ELF, so this is Linux-runner-only by
+          # nature — it cannot run locally on the Windows box that mirrors it.
+          SDK_REPO: https://gitcode.com/rustzhang/harmonyos-sdk.git
         run: |
           set -euo pipefail
-          if [ -z "${SDK_URL:-}" ]; then
-            echo "HARMONYOS_SDK_URL secret is not set — cannot build HarmonyOS." >&2
-            exit 1
-          fi
           SDK_BASE="$HOME/harmonyos-sdk"
-          rm -rf "$SDK_BASE"; mkdir -p "$SDK_BASE" "$RUNNER_TEMP/sdkx"
-          curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/sdk.zip" "$SDK_URL"
-          ls -la "$RUNNER_TEMP/sdk.zip"
+          rm -rf "$SDK_BASE" "$RUNNER_TEMP/sdkx"
+          mkdir -p "$SDK_BASE" "$RUNNER_TEMP/sdkx"
+
+          git clone --depth 1 "$SDK_REPO" "$RUNNER_TEMP/sdkvol"
+          cd "$RUNNER_TEMP/sdkvol"
+          ls part-* | head -3
+          cat part-* > "$RUNNER_TEMP/sdk.zip"
+          echo "reassembled: $(stat -c%s "$RUNNER_TEMP/sdk.zip") bytes"
           unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP/sdkx"
+
           echo "archive top level:"; find "$RUNNER_TEMP/sdkx" -maxdepth 2 -type d | head -20
 
           # The archive's top level is command-line-tools/, holding
-          # bin/ ohpm/ hvigor/ tool/ and sdk/. There is no extra "default"
-          # level here, so take the directory that *contains* bin/ as the root.
+          # bin/ ohpm/ hvigor/ tool/ and sdk/. Take the directory containing
+          # bin/ as the tools root.
           CAND="$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name bin -print -quit)"
           [ -n "$CAND" ] || { echo "no bin/ in the archive" >&2; find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d >&2; exit 1; }
           ROOT="$(dirname "$CAND")"
           echo "tools root: $ROOT"
-          ls -la "$ROOT"
           cp -r "$ROOT"/. "$SDK_BASE"/
-          echo "--- \$SDK_BASE after copy ---"; ls -la "$SDK_BASE"
-          # chmod the toolchains, as the app's CI does — the archive does not
-          # always carry the executable bit through a zip round-trip.
+          echo "--- $SDK_BASE after copy ---"; ls -la "$SDK_BASE"
+
           chmod +x "$SDK_BASE"/openharmony/native/build-tools/cmake/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/openharmony/native/llvm/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/hms/native/build-tools/cmake/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/hms/native/llvm/bin/* 2>/dev/null || true
+          chmod +x "$SDK_BASE"/sdk/*/openharmony/native/llvm/bin/* 2>/dev/null || true
 
           # sdk/ may or may not have a "default" level depending on the package.
           SDK_HOME="$SDK_BASE/sdk"
-          if [ -d "$SDK_BASE/sdk/default/openharmony" ]; then
-            SDK_HOME="$SDK_BASE/sdk/default"
-          fi
+          [ -d "$SDK_BASE/sdk/default/openharmony" ] && SDK_HOME="$SDK_BASE/sdk/default"
           echo "SDK_HOME=$SDK_HOME"; ls -la "$SDK_HOME" 2>/dev/null | head
           {
             echo "DEVECO_SDK_HOME=$SDK_HOME"
@@ -364,7 +361,6 @@ jobs:
           echo "$SDK_BASE/ohpm/bin" >> "$GITHUB_PATH"
           echo "$SDK_BASE/hvigor/bin" >> "$GITHUB_PATH"
           echo "$SDK_HOME/openharmony/native/llvm/bin" >> "$GITHUB_PATH"
-          ls -la "$SDK_BASE" "$SDK_HOME" 2>/dev/null | head -30
 
       - name: Build HAP
         working-directory: src/harmonyos
