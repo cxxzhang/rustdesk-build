@@ -1,21 +1,24 @@
 # RustDesk client for every platform upstream supports, plus HarmonyOS.
 #
-# Modelled on upstream's own CI (rustdesk/rustdesk .github/workflows/bridge.yml
-# + flutter-build.yml). Two things upstream does that a naive build misses:
+# This is a transcription of upstream's own CI (rustdesk/rustdesk
+# .github/workflows/bridge.yml + flutter-build.yml), not a from-scratch build.
+# Where upstream has a helper script (flutter/ndk_arm64.sh, ios_arm64.sh,
+# build_android.sh) that script is called rather than its commands re-typed —
+# they encode flags and paths that are easy to get subtly wrong.
 #
-#   1. The Rust<->Dart bridge is generated ONCE in its own job and handed to
-#      every platform as an artifact. Generating per-platform is slower and
-#      fragile — the codegen must run with the Flutter/Dart the build will use.
-#   2. The toolchain is pinned, not "latest". Rust 1.75 (1.78+ has an ABI change
-#      that breaks the sciter build), Flutter 3.22.3 for the desktop bridge and
-#      3.24.5 for Android, flutter_rust_bridge_codegen 1.80.1 *with
-#      --features uuid*, cargo-expand 1.0.95. Drift any of them and the
-#      generated Dart/Rust pair will not compile.
+# The shape of every platform job is the same, and it is the part a naive build
+# gets wrong:
 #
-# HarmonyOS is the one addition: upstream has no OHOS support, so it comes from
-# liyan-lucky/rustdesk_harmonyos (a separate ArkTS app that links a prebuilt
-# librustdesk_core.a). Its SDK is mirrored into cxxzhang/harmonyos-sdk so the
-# build does not depend on a signed URL or a third party's private repo.
+#   1. install host deps (apt / brew / choco) — including gstreamer and glib
+#   2. set up vcpkg and install vcpkg.json's C libraries
+#      (aom, libvpx, libyuv, ffmpeg, libsodium, opus, libjpeg-turbo)
+#   3. restore the bridge artifact
+#   4. build the Rust lib with cargo, then let flutter package it
+#
+# Pinned versions are upstream's, from its env block: Rust 1.75 (1.78+ changes
+# the i128 ABI and breaks sciter), 1.81 on macOS/iOS (cidre requires it),
+# Flutter 3.22.3 for the desktop bridge and 3.24.5 for Android, NDK r28c,
+# cargo-ndk 3.1.2, flutter_rust_bridge_codegen 1.80.1 with --features uuid.
 name: client
 
 on:
@@ -27,11 +30,13 @@ on:
 
 env:
   RUST_VERSION: '1.75'
+  MAC_RUST_VERSION: '1.81'
   FLUTTER_VERSION: '3.22.3'
   ANDROID_FLUTTER_VERSION: '3.24.5'
   FRB_VERSION: '1.80.1'
   CARGO_EXPAND_VERSION: '1.0.95'
-  NDK_VERSION: '27.0.12077973'
+  CARGO_NDK_VERSION: '3.1.2'
+  NDK_VERSION: 'r28c'
   VCPKG_COMMIT_ID: '9e593bb18ea69cc5095e012465dcd675a822ed0d'
 
 jobs:
@@ -91,7 +96,7 @@ jobs:
             src/rustdesk/flutter/ios/Runner/bridge_generated.h
           if-no-files-found: error
 
-  # ------------------------------------------------------- desktop platforms --
+  # ------------------------------------------------------------------- linux --
   linux:
     name: linux
     needs: bridge
@@ -99,12 +104,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/fetch.sh rustdesk
+      - name: Prerequisites
+        run: |
+          # Upstream's exact Linux list (flutter-build.yml). gstreamer is
+          # required — scrap links gstreamer-sys.
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake curl gcc-multilib git g++ g++-multilib \
+            libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+            pkg-config tree python3 rpm unzip wget xz-utils libssl-dev
+          # RustDesk builds its own opus; a system one shadows it.
+          sudo apt-get remove -y libopus-dev || true
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec's build.rs does env::var("VCPKG_ROOT").unwrap(), and the client
-          # links aom/libvpx/libyuv/ffmpeg/... declared in vcpkg.json. Without this
-          # the build panics with Err(NotPresent) at hwcodec/build.rs:103.
+          # hwcodec/build.rs does env::var("VCPKG_ROOT").unwrap(), and the
+          # client links aom/libvpx/libyuv/ffmpeg/... from vcpkg.json.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -114,38 +133,29 @@ jobs:
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
-      - name: Prerequisites
-        run: |
-          # Upstream's exact Linux dependency list (flutter-build.yml). Notably
-          # gstreamer is required: scrap links gstreamer-sys and without it the
-          # build dies with "system library `gstreamer-1.0` was not found".
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake curl gcc-multilib git g++ g++-multilib \
-            libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
-            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libgtk-3-dev libpulse-dev libva-dev \
-            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
-            openjdk-17-jdk-headless pkg-config tree wget
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: '${{ env.RUST_VERSION }}', components: rustfmt }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
         with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
+      - name: Build rustdesk lib
+        working-directory: src/rustdesk
+        run: cargo build --locked --lib --features hwcodec,flutter,unix-file-copy-paste --release
       - name: Build
         working-directory: src/rustdesk
-        run: python3 build.py --flutter --hwcodec --unix-file-copy-paste
+        # --skip-cargo: the lib was built in the previous step. Upstream splits
+        # it this way so the slow Rust build is cacheable on its own.
+        run: python3 ./build.py --flutter --skip-cargo
       - name: Collect
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -type f \
-            \( -name rustdesk -o -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \; 2>/dev/null || true
+          find src/rustdesk -maxdepth 2 -type f -name '*.deb' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with: { name: rustdesk-client-linux, path: dist/, if-no-files-found: warn }
 
+  # ----------------------------------------------------------------- windows --
   windows:
     name: windows
     needs: bridge
@@ -156,20 +166,26 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec's build.rs does env::var("VCPKG_ROOT").unwrap(), and the client
-          # links aom/libvpx/libyuv/ffmpeg/... declared in vcpkg.json. Without this
-          # the build panics with Err(NotPresent) at hwcodec/build.rs:103.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static-md \
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static \
             --x-install-root="$VCPKG_ROOT/installed"
+      - name: Point libsodium at vcpkg
+        shell: bash
+        run: |
+          echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/x64-windows-static/lib" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '${{ env.RUST_VERSION }}', targets: x86_64-pc-windows-msvc, components: rustfmt }
+        with:
+          toolchain: '${{ env.RUST_VERSION }}'
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
@@ -178,7 +194,7 @@ jobs:
       - name: Build
         working-directory: src/rustdesk
         shell: bash
-        run: python build.py --portable --flutter --skip-portable-pack --hwcodec
+        run: python3 ./build.py --portable --flutter --skip-portable-pack --hwcodec
       - name: Collect
         shell: bash
         run: |
@@ -188,6 +204,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: rustdesk-client-windows, path: dist/, if-no-files-found: warn }
 
+  # ------------------------------------------------------------------- macos --
   macos:
     name: macos
     needs: bridge
@@ -195,12 +212,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/fetch.sh rustdesk
+      - name: Prerequisites
+        run: |
+          brew install llvm create-dmg pkg-config yasm
+          # NOT `brew install nasm` — that is NASM 3.x, which upstream avoids.
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec's build.rs does env::var("VCPKG_ROOT").unwrap(), and the client
-          # links aom/libvpx/libyuv/ffmpeg/... declared in vcpkg.json. Without this
-          # the build panics with Err(NotPresent) at hwcodec/build.rs:103.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -211,16 +229,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
       - uses: dtolnay/rust-toolchain@master
-        # 1.81, not 1.75: a dependency (cidre) requires it on macOS.
-        with: { toolchain: '1.81', targets: aarch64-apple-darwin, components: rustfmt }
+        with:
+          toolchain: '${{ env.MAC_RUST_VERSION }}'
+          targets: aarch64-apple-darwin
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
         with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
-      - run: brew install create-dmg nasm yasm || true
       - name: Build
         working-directory: src/rustdesk
-        run: python3 build.py --flutter --hwcodec --unix-file-copy-paste
+        run: ./build.py --flutter --hwcodec --unix-file-copy-paste
       - name: Collect
         run: |
           mkdir -p dist
@@ -239,24 +258,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
-            /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h /
       - name: Prerequisites
         run: |
-          # Upstream's Android job installs the same host libraries as its Linux
-          # job — the Rust build still compiles host-side crates (glib-sys etc.)
-          # before cross-compiling, so libgtk-3-dev (which brings glib-2.0) and
-          # the rest are required here too.
+          # Same host libraries as the Linux job: the Rust build compiles
+          # host-side crates (glib-sys, gstreamer-sys) before cross-compiling.
           sudo apt-get update
-          sudo apt-get install -y             clang cmake curl gcc-multilib git g++ g++-multilib             libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             libgtk-3-dev libpulse-dev libva-dev             libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev             libxdo-dev libxfixes-dev llvm-dev nasm ninja-build             openjdk-17-jdk-headless pkg-config tree wget
+          sudo apt-get install -y \
+            clang cmake curl gcc-multilib git g++ g++-multilib \
+            libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev \
+            libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+            openjdk-17-jdk-headless pkg-config tree wget
+          sudo apt-get remove -y libopus-dev || true
       - run: bash scripts/fetch.sh rustdesk
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec's build.rs does env::var("VCPKG_ROOT").unwrap(), and the client
-          # links aom/libvpx/libyuv/ffmpeg/... declared in vcpkg.json. Without this
-          # the build panics with Err(NotPresent) at hwcodec/build.rs:103.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -270,8 +291,6 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - name: Android SDK + NDK
         run: |
-          # Installed directly rather than via setup-ndk, which failed to
-          # initialise on this runner image.
           export ANDROID_SDK_ROOT="$HOME/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -fsSL -o /tmp/cmdtools.zip \
@@ -285,24 +304,34 @@ jobs:
             echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
             echo "ANDROID_HOME=$ANDROID_SDK_ROOT"
             echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+            echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
           } >> "$GITHUB_ENV"
-          # A bare path must go to GITHUB_PATH, not GITHUB_ENV — writing it to
-          # the env file makes the runner reject the whole block.
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '${{ env.RUST_VERSION }}'
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
           cache: true
-      - run: cargo install cargo-ndk --version 3.1.2 --locked
-      - name: Build
+      - name: Build rustdesk lib
         working-directory: src/rustdesk
-        run: python3 build.py --flutter
+        run: |
+          cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
+          # The repo's own script: cargo ndk --platform 21 --target
+          # aarch64-linux-android build --locked --release --features flutter,hwcodec
+          bash flutter/ndk_arm64.sh
+          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          find ./target/aarch64-linux-android/release -maxdepth 1 -name '*.so' \
+            -exec cp {} ./flutter/android/app/src/main/jniLibs/arm64-v8a/ \;
+      - name: Build APK
+        working-directory: src/rustdesk/flutter
+        run: flutter build apk --release --target-platform android-arm64 --split-per-abi
       - name: Collect
         run: |
           mkdir -p dist
@@ -323,9 +352,6 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec's build.rs does env::var("VCPKG_ROOT").unwrap(), and the client
-          # links aom/libvpx/libyuv/ffmpeg/... declared in vcpkg.json. Without this
-          # the build panics with Err(NotPresent) at hwcodec/build.rs:103.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -338,16 +364,20 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '1.81', targets: aarch64-apple-ios, components: rustfmt }
+        with:
+          toolchain: '${{ env.MAC_RUST_VERSION }}'
+          targets: aarch64-apple-ios
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
-      - name: Build rust lib
+      - name: Build rustdesk lib
         working-directory: src/rustdesk
-        run: cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+        # The repo's own script: cargo build --locked --features
+        # flutter,hwcodec --release --target aarch64-apple-ios --lib
+        run: bash flutter/ios_arm64.sh
       - name: Build ipa (unsigned)
         working-directory: src/rustdesk/flutter
-        # --no-codesign: produces an ipa that needs re-signing to install.
-        # Upstream builds it the same way; signing needs an Apple certificate
+        # --no-codesign, as upstream: installing needs an Apple certificate
         # this pipeline does not hold.
         run: flutter build ipa --release --no-codesign
       - name: Collect
@@ -361,10 +391,11 @@ jobs:
 
   # ---------------------------------------------------------------- harmonyos --
   #
-  # Not upstream: RustDesk has no OHOS support. This builds liyan-lucky's
-  # HarmonyOS app, which links a prebuilt librustdesk_core.a. The SDK is pulled
-  # from our own mirror (cxxzhang/harmonyos-sdk) rather than a signed Huawei URL
-  # or a third party's private repo.
+  # The one genuine addition: upstream has no OHOS support. This builds
+  # liyan-lucky's ArkTS app, which links a prebuilt librustdesk_core.a. The SDK
+  # comes from a GitCode repo (split into 99 MB volumes, because GitHub caps a
+  # release asset at 2 GiB and the archive is 2.3 GB). Its toolchain binaries
+  # are ELF, so this is Linux-runner-only by nature.
   harmonyos:
     name: harmonyos
     runs-on: ubuntu-latest
@@ -384,45 +415,30 @@ jobs:
           git -C src/harmonyos log --oneline -1
       - name: Install HarmonyOS SDK
         env:
-          # The SDK is ~2.3 GB, over GitHub's 2 GiB release-asset limit, so it
-          # lives in a GitCode repo split into 99 MB volumes (GitCode caps a
-          # single file at 100 MB). Reassembled here and unpacked.
-          #
-          # The toolchain binaries are ELF, so this is Linux-runner-only by
-          # nature — it cannot run locally on the Windows box that mirrors it.
           SDK_REPO: https://gitcode.com/rustzhang/harmonyos-sdk.git
         run: |
           set -euo pipefail
           SDK_BASE="$HOME/harmonyos-sdk"
           rm -rf "$SDK_BASE" "$RUNNER_TEMP/sdkx"
           mkdir -p "$SDK_BASE" "$RUNNER_TEMP/sdkx"
-
           git clone --depth 1 "$SDK_REPO" "$RUNNER_TEMP/sdkvol"
           cd "$RUNNER_TEMP/sdkvol"
-          ls part-* | head -3
           cat part-* > "$RUNNER_TEMP/sdk.zip"
           echo "reassembled: $(stat -c%s "$RUNNER_TEMP/sdk.zip") bytes"
           unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP/sdkx"
-
           echo "archive top level:"; find "$RUNNER_TEMP/sdkx" -maxdepth 2 -type d | head -20
-
-          # The archive's top level is command-line-tools/, holding
-          # bin/ ohpm/ hvigor/ tool/ and sdk/. Take the directory containing
-          # bin/ as the tools root.
+          # The archive's top level is command-line-tools/ holding
+          # bin/ ohpm/ hvigor/ tool/ and sdk/. Take the dir containing bin/.
           CAND="$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name bin -print -quit)"
           [ -n "$CAND" ] || { echo "no bin/ in the archive" >&2; find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d >&2; exit 1; }
           ROOT="$(dirname "$CAND")"
           echo "tools root: $ROOT"
           cp -r "$ROOT"/. "$SDK_BASE"/
-          echo "--- $SDK_BASE after copy ---"; ls -la "$SDK_BASE"
-
           chmod +x "$SDK_BASE"/openharmony/native/build-tools/cmake/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/openharmony/native/llvm/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/hms/native/build-tools/cmake/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/hms/native/llvm/bin/* 2>/dev/null || true
           chmod +x "$SDK_BASE"/sdk/*/openharmony/native/llvm/bin/* 2>/dev/null || true
-
-          # sdk/ may or may not have a "default" level depending on the package.
           SDK_HOME="$SDK_BASE/sdk"
           [ -d "$SDK_BASE/sdk/default/openharmony" ] && SDK_HOME="$SDK_BASE/sdk/default"
           echo "SDK_HOME=$SDK_HOME"; ls -la "$SDK_HOME" 2>/dev/null | head
@@ -436,15 +452,11 @@ jobs:
           echo "$SDK_BASE/ohpm/bin" >> "$GITHUB_PATH"
           echo "$SDK_BASE/hvigor/bin" >> "$GITHUB_PATH"
           echo "$SDK_HOME/openharmony/native/llvm/bin" >> "$GITHUB_PATH"
-
       - name: Build HAP
         working-directory: src/harmonyos
         env:
           HARMONY_ARTIFACTS_DIR: ${{ runner.temp }}/harmonyos-artifacts
         run: |
-          # The app ships its own Linux build script: it knows where the SDK's
-          # hvigor/ohpm live and patches hvigor for a headless runner. Called
-          # with the same flags its own CI passes.
           mkdir -p "$HARMONY_ARTIFACTS_DIR"
           chmod +x scripts/github_build_harmonyos_linux.sh
           scripts/github_build_harmonyos_linux.sh \
@@ -453,7 +465,6 @@ jobs:
             --artifacts-dir "$HARMONY_ARTIFACTS_DIR" \
             --abi-filter arm64-v8a \
             --skip-package-verify
-
       - name: Collect
         run: |
           mkdir -p dist
