@@ -115,7 +115,7 @@ jobs:
             libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
             openjdk-17-jdk-headless pkg-config tree wget
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '${{ env.RUST_VERSION }}' }
+        with: { toolchain: '${{ env.RUST_VERSION }}', components: rustfmt }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
@@ -142,7 +142,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '${{ env.RUST_VERSION }}', targets: x86_64-pc-windows-msvc }
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: x86_64-pc-windows-msvc, components: rustfmt }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
@@ -172,7 +172,7 @@ jobs:
         with: { name: bridge-artifact }
       - uses: dtolnay/rust-toolchain@master
         # 1.81, not 1.75: a dependency (cidre) requires it on macOS.
-        with: { toolchain: '1.81', targets: aarch64-apple-darwin }
+        with: { toolchain: '1.81', targets: aarch64-apple-darwin, components: rustfmt }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
@@ -240,6 +240,7 @@ jobs:
         with:
           toolchain: '${{ env.RUST_VERSION }}'
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          components: rustfmt
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -271,7 +272,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '1.81', targets: aarch64-apple-ios }
+        with: { toolchain: '1.81', targets: aarch64-apple-ios, components: rustfmt }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - name: Build rust lib
