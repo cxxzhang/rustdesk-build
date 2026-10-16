@@ -1,57 +1,119 @@
-# RustDesk client, one job per platform.
+# RustDesk client, modelled directly on upstream's own CI
+# (rustdesk/rustdesk .github/workflows/bridge.yml + flutter-build.yml).
 #
-# GitHub gives us native Windows and macOS runners, so there is no
-# cross-compiling: `flutter build windows` runs on Windows and `flutter build
-# macos` on macOS, each with the toolchain the platform expects.
+# Two things upstream does that a naive build misses, and that make the
+# difference between working and a codegen panic:
 #
-# The generated Rust<->Dart bridge is NOT committed upstream, so it is produced
-# first by scripts/gen-bridge.sh. That script pins flutter_rust_bridge to the
-# 1.80 line the Cargo.toml requires; the 2.x CLI is a different interface and
-# fails with "Fail to find any configuration file".
-#
-# Every job is `continue-on-error` at the workflow level via `if-no-files-found:
-# warn` on the uploads: these are the parts most likely to need iteration, and a
-# red macOS job should not hide a green Linux one.
+#   1. The Rust<->Dart bridge is generated ONCE in its own job and handed to
+#      every platform as an artifact. Generating it per-platform is both slower
+#      and fragile (the codegen must run with the Flutter/Dart the build will
+#      use, so it happens on one pinned runner).
+#   2. The toolchain is pinned, not "latest": Rust 1.75, Flutter 3.22.3,
+#      flutter_rust_bridge_codegen 1.80.1 *with --features uuid*, cargo-expand
+#      1.0.95. Upstream pins these because the generated pair must match the
+#      crate; drifting any of them yields a Dart/Rust pair that will not
+#      compile.
 name: client
 
-# Disabled: the official RustDesk client is used as-is (pointed at our server),
-# so there is nothing to compile. Kept for reference only — `on:` is emptied so
-# it cannot run.
 on:
-  # push: ... removed on purpose
-    inputs:
-      flutter_version:
-        description: Flutter SDK version
-        default: '3.24.5'
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'patches/**', '.github/workflows/client.yml']
+  workflow_dispatch:
   workflow_call:
 
 env:
-  FLUTTER_VERSION: ${{ inputs.flutter_version || '3.24.5' }}
-  FRB_CODEGEN_VERSION: '1.80.1'
+  # All four pinned to upstream's values; see the note above.
+  RUST_VERSION: '1.75'
+  FLUTTER_VERSION: '3.22.3'
+  FRB_VERSION: '1.80.1'
+  CARGO_EXPAND_VERSION: '1.0.95'
 
 jobs:
-  linux:
-    name: linux
+  # ------------------------------------------------------------------ bridge --
+  bridge:
+    name: generate bridge
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: System dependencies
+      - run: bash scripts/fetch.sh rustdesk
+      - name: Prerequisites
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev \
-            libayatana-appindicator3-dev libxdo-dev libssl-dev \
-            libasound2-dev libpulse-dev libva-dev libvdpau-dev \
-            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxfixes-dev libxrandr-dev libxi-dev libxkbcommon-dev \
-            libpipewire-0.3-dev libwayland-dev libclang-dev
+          sudo apt-get install -y -qq clang libclang-dev llvm-dev cmake ninja-build \
+            pkg-config libgtk-3-dev nasm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bridge
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-      - uses: dtolnay/rust-toolchain@stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Install codegen
+        run: |
+          cargo install cargo-expand --version "$CARGO_EXPAND_VERSION" --locked
+          cargo install flutter_rust_bridge_codegen --version "$FRB_VERSION" \
+            --features "uuid" --locked
+      - name: Prepare pubspec
+        working-directory: src/rustdesk
+        run: |
+          # extended_text 14 needs a newer Dart than Flutter 3.22.3 ships, so
+          # dependency resolution fails without this pin — upstream does the same.
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          pushd flutter && flutter pub get && popd
+      - name: Run codegen
+        working-directory: src/rustdesk
+        run: |
+          flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            src/rustdesk/src/bridge_generated.rs
+            src/rustdesk/src/bridge_generated.io.rs
+            src/rustdesk/flutter/lib/generated_bridge.dart
+            src/rustdesk/flutter/lib/generated_bridge.freezed.dart
+            src/rustdesk/flutter/macos/Runner/bridge_generated.h
+            src/rustdesk/flutter/ios/Runner/bridge_generated.h
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- platforms --
+  linux:
+    name: linux
+    needs: bridge
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
       - run: bash scripts/fetch.sh rustdesk
-      - run: bash scripts/gen-bridge.sh src/rustdesk
+      - uses: actions/download-artifact@v4
+        with: { name: bridge-artifact }
+      - name: Prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev \
+            liblzma-dev libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libasound2-dev libpulse-dev libva-dev libvdpau-dev nasm \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxfixes-dev \
+            libxrandr-dev libxi-dev libxkbcommon-dev libpipewire-0.3-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}' }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src/rustdesk }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
@@ -59,31 +121,31 @@ jobs:
         run: |
           mkdir -p dist
           find src/rustdesk/flutter/build -type f \
-            \( -name 'rustdesk' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' \) \
-            -exec cp {} dist/ \; 2>/dev/null || true
+            \( -name rustdesk -o -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-client-linux
-          path: dist/
-          if-no-files-found: warn
+        with: { name: rustdesk-client-linux, path: dist/, if-no-files-found: warn }
 
   windows:
     name: windows
-    runs-on: windows-latest
+    needs: bridge
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - run: bash scripts/fetch.sh rustdesk
+      - uses: actions/download-artifact@v4
+        with: { name: bridge-artifact }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: x86_64-pc-windows-msvc }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - name: LLVM (bindgen needs libclang)
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: LLVM
         run: choco install llvm -y --no-progress
-      - run: bash scripts/fetch.sh rustdesk
-      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build
         working-directory: src/rustdesk
         shell: bash
@@ -92,31 +154,30 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -type f \
-            \( -name 'rustdesk.exe' -o -name '*.msi' -o -name '*.zip' \) \
-            -exec cp {} dist/ \; 2>/dev/null || true
+          find src/rustdesk/flutter/build -type f -name 'rustdesk.exe' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-client-windows
-          path: dist/
-          if-no-files-found: warn
+        with: { name: rustdesk-client-windows, path: dist/, if-no-files-found: warn }
 
   macos:
     name: macos
+    needs: bridge
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - run: bash scripts/fetch.sh rustdesk
+      - uses: actions/download-artifact@v4
+        with: { name: bridge-artifact }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: aarch64-apple-darwin }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
       - run: brew install create-dmg || true
-      - run: bash scripts/fetch.sh rustdesk
-      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
@@ -127,24 +188,21 @@ jobs:
           find src/rustdesk/flutter/build -type f -name '*.dmg' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-client-macos
-          path: dist/
-          if-no-files-found: warn
+        with: { name: rustdesk-client-macos, path: dist/, if-no-files-found: warn }
 
   android:
     name: android
+    needs: bridge
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: bash scripts/fetch.sh rustdesk
+      - uses: actions/download-artifact@v4
+        with: { name: bridge-artifact }
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+        with: { distribution: temurin, java-version: '17' }
       - name: Android SDK + NDK
         run: |
-          # Installed by hand rather than via android-actions/setup-android,
-          # which failed to initialise its SDK root on this runner image.
           export ANDROID_SDK_ROOT="$HOME/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -fsSL -o /tmp/cmdtools.zip \
@@ -160,17 +218,17 @@ jobs:
             echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973"
             echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
           } >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '${{ env.RUST_VERSION }}'
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
       - run: cargo install cargo-ndk --locked
-      - run: bash scripts/fetch.sh rustdesk
-      - run: bash scripts/gen-bridge.sh src/rustdesk
-      - name: Build APK
+      - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
       - name: Collect
@@ -179,7 +237,4 @@ jobs:
           find src/rustdesk/flutter/build -type f -name '*.apk' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
-        with:
-          name: rustdesk-client-android
-          path: dist/
-          if-no-files-found: warn
+        with: { name: rustdesk-client-android, path: dist/, if-no-files-found: warn }
