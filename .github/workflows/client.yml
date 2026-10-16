@@ -304,10 +304,14 @@ jobs:
           git -C src/harmonyos log --oneline -1
       - name: Install HarmonyOS SDK
         env:
-          # Huawei's command-line-tools archive is 2.3 GB, over GitHub's 2 GiB
-          # release-asset limit, so it cannot be mirrored here. The signed
-          # download URL (valid ~10 years) lives in a secret instead: the runner
-          # fetches straight from Huawei and nothing is re-hosted.
+          # Huawei's SDK archive is ~2.3 GB, over GitHub's 2 GiB release-asset
+          # limit, so it cannot be mirrored here. The signed download URL
+          # (valid ~10 years) lives in a secret: the runner fetches straight
+          # from Huawei and nothing is re-hosted.
+          #
+          # The layout the build expects, taken from the app's own CI:
+          #   $SDK_BASE/{bin,ohpm,hvigor,tool}
+          #   $SDK_BASE/sdk/default/{openharmony,hms}     <- native SDK lives here
           SDK_URL: ${{ secrets.HARMONYOS_SDK_URL }}
         run: |
           set -euo pipefail
@@ -320,29 +324,59 @@ jobs:
           curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/sdk.zip" "$SDK_URL"
           ls -la "$RUNNER_TEMP/sdk.zip"
           unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP/sdkx"
-          # The archive's top level is command-line-tools/; the build wants a
-          # root that contains openharmony/ and hms/.
-          ROOT="$(dirname "$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name openharmony -print -quit)")"
-          [ -n "$ROOT" ] || { echo "no SDK root found"; find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d | head -30; exit 1; }
+          echo "archive top level:"; find "$RUNNER_TEMP/sdkx" -maxdepth 2 -type d | head -20
+
+          ROOT="$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name openharmony -print -quit)"
+          ROOT="$(dirname "$(dirname "$ROOT")")"   # .../sdk/default
+          [ -n "$ROOT" ] && [ -d "$ROOT" ] || {
+            echo "could not locate sdk/default in the archive" >&2
+            find "$RUNNER_TEMP/sdkx" -maxdepth 4 -type d | head -40 >&2
+            exit 1
+          }
+          echo "sdk root: $ROOT"
           cp -r "$ROOT"/. "$SDK_BASE"/
-          echo "SDK_ROOT=$SDK_BASE" >> "$GITHUB_ENV"
-          echo "DEVECO_SDK_HOME=$SDK_BASE" >> "$GITHUB_ENV"
-          echo "OHOS_HVIGOR_SDK_ROOT=$SDK_BASE" >> "$GITHUB_ENV"
-          echo "$SDK_BASE/command-line-tools/bin" >> "$GITHUB_PATH"
-          echo "$SDK_BASE/command-line-tools/ohpm/bin" >> "$GITHUB_PATH"
-          ls -la "$SDK_BASE"
+          # chmod the toolchains, as the app's CI does — the archive does not
+          # always carry the executable bit through a zip round-trip.
+          chmod +x "$SDK_BASE"/openharmony/native/build-tools/cmake/bin/* 2>/dev/null || true
+          chmod +x "$SDK_BASE"/openharmony/native/llvm/bin/* 2>/dev/null || true
+          chmod +x "$SDK_BASE"/hms/native/build-tools/cmake/bin/* 2>/dev/null || true
+          chmod +x "$SDK_BASE"/hms/native/llvm/bin/* 2>/dev/null || true
+
+          SDK_HOME="$SDK_BASE/sdk/default"
+          {
+            echo "DEVECO_SDK_HOME=$SDK_HOME"
+            echo "OHOS_HVIGOR_SDK_ROOT=$SDK_HOME"
+            echo "DEVECO_TOOLS_HOME=$SDK_BASE"
+            echo "DEVECO_NODE_EXE=$(command -v node)"
+          } >> "$GITHUB_ENV"
+          echo "$SDK_BASE/bin" >> "$GITHUB_PATH"
+          echo "$SDK_BASE/ohpm/bin" >> "$GITHUB_PATH"
+          echo "$SDK_BASE/hvigor/bin" >> "$GITHUB_PATH"
+          echo "$SDK_HOME/openharmony/native/llvm/bin" >> "$GITHUB_PATH"
+          ls -la "$SDK_BASE" "$SDK_HOME" 2>/dev/null | head -30
+
       - name: Build HAP
         working-directory: src/harmonyos
         env:
-          SKIP_PACKAGE_VERIFY: 'true'
+          HARMONY_ARTIFACTS_DIR: ${{ runner.temp }}/harmonyos-artifacts
         run: |
-          # The repo ships its own Linux build script, which knows where the
-          # SDK's hvigor/ohpm live and patches hvigor for a headless runner.
-          bash scripts/github_build_harmonyos_linux.sh
+          # The app ships its own Linux build script: it knows where the SDK's
+          # hvigor/ohpm live and patches hvigor for a headless runner. Called
+          # with the same flags its own CI passes.
+          mkdir -p "$HARMONY_ARTIFACTS_DIR"
+          chmod +x scripts/github_build_harmonyos_linux.sh
+          scripts/github_build_harmonyos_linux.sh \
+            --artifact-type hap \
+            --version-bump none \
+            --artifacts-dir "$HARMONY_ARTIFACTS_DIR" \
+            --abi-filter arm64-v8a \
+            --skip-package-verify
+
       - name: Collect
         run: |
           mkdir -p dist
-          find src/harmonyos -type f -name '*.hap' -exec cp {} dist/ \; 2>/dev/null || true
+          find src/harmonyos "$HARMONY_ARTIFACTS_DIR" -type f -name '*.hap' \
+            -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with: { name: rustdesk-client-harmonyos, path: dist/, if-no-files-found: warn }
