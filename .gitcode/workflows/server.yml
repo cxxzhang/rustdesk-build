@@ -1,0 +1,104 @@
+# hbbs / hbbr / rustdesk-utils for Linux, Windows and macOS.
+#
+# Pure Rust with no C dependencies (build.py: "no C libraries, no vcpkg"), so
+# every target cross-compiles from one Linux runner:
+#   - linux   : the host target
+#   - windows : x86_64-pc-windows-gnu, needs mingw-w64
+#   - darwin  : x86_64-apple-darwin, needs the osxcross SDK below
+#
+# macOS binaries need an Apple SDK to link against. The public
+# `joseluisq/macosx-sdks` mirror is widely used for exactly this; if that
+# changes, point MACOS_SDK_URL at any tarball with the same layout.
+name: server
+
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', '.gitcode/workflows/server.yml']
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: 'stable'
+  MACOS_SDK_VERSION: '12.3'
+  MACOS_SDK_URL: 'https://github.com/joseluisq/macosx-sdks/releases/download/12.3/MacOSX12.3.sdk.tar.xz'
+
+jobs:
+  build:
+    name: hbbs/hbbr (${{ matrix.target }})
+    runs-on: [ubuntu-latest, x64, medium]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: linux
+            apt: ''
+          - target: x86_64-pc-windows-gnu
+            os: windows
+            apt: 'gcc-mingw-w64-x86-64'
+          - target: x86_64-apple-darwin
+            os: macos
+            apt: 'clang llvm'
+    steps:
+      - name: Checkout pipeline
+        uses: checkout
+
+      - name: Fetch rustdesk-server
+        run: bash scripts/fetch.sh rustdesk-server
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+          echo "$HOME/.cargo/bin" >> "$ATOMGIT_PATH"
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install build tools
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ${{ matrix.apt }}
+
+      - name: Install macOS SDK (osxcross)
+        if: matrix.os == 'macos'
+        run: |
+          sudo mkdir -p /opt/osxcross
+          curl -sSL "$MACOS_SDK_URL" | sudo tar -xJ -C /opt/osxcross
+          SDK=$(ls -d /opt/osxcross/MacOSX*.sdk)
+          sudo ln -sfn "$SDK" /opt/osxcross/MacOSX.sdk
+          echo "SDK=$SDK"
+
+      - name: Configure cross linker
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-pc-windows-gnu)
+              echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc" >> "$GITHUB_ENV" ;;
+            x86_64-apple-darwin)
+              # A minimal linker wrapper is enough here: these binaries have no
+              # C dependencies to compile, only a libSystem to link against.
+              mkdir -p "$HOME/bin"
+              printf '#!/bin/sh\nexec clang -target x86_64-apple-darwin -isysroot /opt/osxcross/MacOSX.sdk "$@"\n' > "$HOME/bin/osx-linker"
+              chmod +x "$HOME/bin/osx-linker"
+              echo "$HOME/bin" >> "$GITHUB_ENV"
+              echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$HOME/bin/osx-linker" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Build
+        working-directory: src/rustdesk-server
+        run: cargo build --release --target "${{ matrix.target }}" --bin hbbs --bin hbbr --bin rustdesk-utils
+
+      - name: Collect
+        run: |
+          OUT="src/rustdesk-server/target/${{ matrix.target }}/release"
+          mkdir -p dist
+          cp "$OUT"/hbbs "$OUT"/hbbr "$OUT"/rustdesk-utils dist/ 2>/dev/null \
+            || cp "$OUT"/hbbs.exe "$OUT"/hbbr.exe "$OUT"/rustdesk-utils.exe dist/
+          ls -la dist
+
+      - name: Upload
+        uses: upload-artifact
+        with:
+          name: andesk-server-${{ matrix.target }}
+          path: dist/
