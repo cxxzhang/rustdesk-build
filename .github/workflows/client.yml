@@ -202,6 +202,14 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
             /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h /
+      - name: Prerequisites
+        run: |
+          # Upstream's Android job installs the same host libraries as its Linux
+          # job — the Rust build still compiles host-side crates (glib-sys etc.)
+          # before cross-compiling, so libgtk-3-dev (which brings glib-2.0) and
+          # the rest are required here too.
+          sudo apt-get update
+          sudo apt-get install -y             clang cmake curl gcc-multilib git g++ g++-multilib             libayatana-appindicator3-dev libasound2-dev libc6-dev libclang-dev             libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             libgtk-3-dev libpulse-dev libva-dev             libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev             libxdo-dev libxfixes-dev llvm-dev nasm ninja-build             openjdk-17-jdk-headless pkg-config tree wget
       - run: bash scripts/fetch.sh rustdesk
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
