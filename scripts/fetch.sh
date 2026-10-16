@@ -91,6 +91,14 @@ fetch_rustdesk() {
   local dest="$SRC_DIR/rustdesk"
   [ -d "$dest/.git" ] && { log "rustdesk present"; return 0; }
   clone_upstream https://github.com/rustdesk/rustdesk.git "$RUSTDESK_CLIENT_COMMIT" "$dest"
+  # rustdesk has its own submodules (libs/hbb_common and others). Without them
+  # the Cargo workspace cannot even be parsed, which is what makes
+  # flutter_rust_bridge_codegen panic with "failed to read
+  # libs/hbb_common/Cargo.toml: No such file or directory".
+  if [ -f "$dest/.gitmodules" ]; then
+    log "initialising submodules"
+    git -C "$dest" submodule update --init --recursive --depth 1
+  fi
   apply_patches "$dest" 'rustdesk.patch'
 }
 
