@@ -1,18 +1,21 @@
-# RustDesk client, modelled directly on upstream's own CI
-# (rustdesk/rustdesk .github/workflows/bridge.yml + flutter-build.yml).
+# RustDesk client for every platform upstream supports, plus HarmonyOS.
 #
-# Two things upstream does that a naive build misses, and that make the
-# difference between working and a codegen panic:
+# Modelled on upstream's own CI (rustdesk/rustdesk .github/workflows/bridge.yml
+# + flutter-build.yml). Two things upstream does that a naive build misses:
 #
 #   1. The Rust<->Dart bridge is generated ONCE in its own job and handed to
-#      every platform as an artifact. Generating it per-platform is both slower
-#      and fragile (the codegen must run with the Flutter/Dart the build will
-#      use, so it happens on one pinned runner).
-#   2. The toolchain is pinned, not "latest": Rust 1.75, Flutter 3.22.3,
-#      flutter_rust_bridge_codegen 1.80.1 *with --features uuid*, cargo-expand
-#      1.0.95. Upstream pins these because the generated pair must match the
-#      crate; drifting any of them yields a Dart/Rust pair that will not
-#      compile.
+#      every platform as an artifact. Generating per-platform is slower and
+#      fragile — the codegen must run with the Flutter/Dart the build will use.
+#   2. The toolchain is pinned, not "latest". Rust 1.75 (1.78+ has an ABI change
+#      that breaks the sciter build), Flutter 3.22.3 for the desktop bridge and
+#      3.24.5 for Android, flutter_rust_bridge_codegen 1.80.1 *with
+#      --features uuid*, cargo-expand 1.0.95. Drift any of them and the
+#      generated Dart/Rust pair will not compile.
+#
+# HarmonyOS is the one addition: upstream has no OHOS support, so it comes from
+# liyan-lucky/rustdesk_harmonyos (a separate ArkTS app that links a prebuilt
+# librustdesk_core.a). Its SDK is mirrored into cxxzhang/harmonyos-sdk so the
+# build does not depend on a signed URL or a third party's private repo.
 name: client
 
 on:
@@ -23,11 +26,12 @@ on:
   workflow_call:
 
 env:
-  # All four pinned to upstream's values; see the note above.
   RUST_VERSION: '1.75'
   FLUTTER_VERSION: '3.22.3'
+  ANDROID_FLUTTER_VERSION: '3.24.5'
   FRB_VERSION: '1.80.1'
   CARGO_EXPAND_VERSION: '1.0.95'
+  NDK_VERSION: '27.0.12077973'
 
 jobs:
   # ------------------------------------------------------------------ bridge --
@@ -48,8 +52,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: bridge
+        with: { prefix-key: bridge }
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -63,8 +66,8 @@ jobs:
       - name: Prepare pubspec
         working-directory: src/rustdesk
         run: |
-          # extended_text 14 needs a newer Dart than Flutter 3.22.3 ships, so
-          # dependency resolution fails without this pin — upstream does the same.
+          # extended_text 14 needs a newer Dart than 3.22.3 ships; resolution
+          # fails without this pin. Upstream does the same.
           sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
           pushd flutter && flutter pub get && popd
       - name: Run codegen
@@ -87,7 +90,7 @@ jobs:
             src/rustdesk/flutter/ios/Runner/bridge_generated.h
           if-no-files-found: error
 
-  # --------------------------------------------------------------- platforms --
+  # ------------------------------------------------------- desktop platforms --
   linux:
     name: linux
     needs: bridge
@@ -110,10 +113,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
+        with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
@@ -140,12 +140,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-      - name: LLVM
-        run: choco install llvm -y --no-progress
+        with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
+      - run: choco install llvm -y --no-progress
       - name: Build
         working-directory: src/rustdesk
         shell: bash
@@ -169,15 +165,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
       - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: '${{ env.RUST_VERSION }}', targets: aarch64-apple-darwin }
+        # 1.81, not 1.75: a dependency (cidre) requires it on macOS.
+        with: { toolchain: '1.81', targets: aarch64-apple-darwin }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: src/rustdesk }
       - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-      - run: brew install create-dmg || true
+        with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
+      - run: brew install create-dmg nasm yasm || true
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
@@ -190,18 +184,27 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: rustdesk-client-macos, path: dist/, if-no-files-found: warn }
 
+  # ----------------------------------------------------------------- android --
   android:
     name: android
     needs: bridge
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
+            /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
       - run: bash scripts/fetch.sh rustdesk
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
-      - name: Android SDK + NDK
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with: { ndk-version: '${{ env.NDK_VERSION }}' }
+      - name: Android SDK
         run: |
           export ANDROID_SDK_ROOT="$HOME/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
@@ -211,11 +214,11 @@ jobs:
           mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           {
             echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
             echo "ANDROID_HOME=$ANDROID_SDK_ROOT"
-            echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+            echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}"
             echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
           } >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
@@ -225,9 +228,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
           cache: true
-      - run: cargo install cargo-ndk --locked
+      - run: cargo install cargo-ndk --version 3.1.2 --locked
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
@@ -238,3 +241,100 @@ jobs:
           ls -la dist
       - uses: actions/upload-artifact@v4
         with: { name: rustdesk-client-android, path: dist/, if-no-files-found: warn }
+
+  # --------------------------------------------------------------------- ios --
+  ios:
+    name: ios
+    needs: bridge
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install nasm yasm || true
+      - run: bash scripts/fetch.sh rustdesk
+      - uses: actions/download-artifact@v4
+        with: { name: bridge-artifact }
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.81', targets: aarch64-apple-ios }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src/rustdesk }
+      - name: Build rust lib
+        working-directory: src/rustdesk
+        run: cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+      - name: Build ipa (unsigned)
+        working-directory: src/rustdesk/flutter
+        # --no-codesign: produces an ipa that needs re-signing to install.
+        # Upstream builds it the same way; signing needs an Apple certificate
+        # this pipeline does not hold.
+        run: flutter build ipa --release --no-codesign
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find src/rustdesk/flutter/build/ios -type f -name '*.ipa' -exec cp {} dist/ \; 2>/dev/null || true
+          find src/rustdesk/flutter/build/ios -maxdepth 4 -type d -name '*.app' -exec cp -r {} dist/ \; 2>/dev/null || true
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with: { name: rustdesk-client-ios, path: dist/, if-no-files-found: warn }
+
+  # ---------------------------------------------------------------- harmonyos --
+  #
+  # Not upstream: RustDesk has no OHOS support. This builds liyan-lucky's
+  # HarmonyOS app, which links a prebuilt librustdesk_core.a. The SDK is pulled
+  # from our own mirror (cxxzhang/harmonyos-sdk) rather than a signed Huawei URL
+  # or a third party's private repo.
+  harmonyos:
+    name: harmonyos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: zulu, java-version: '17' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: System tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip zip p7zip-full curl jq python3 rsync
+      - name: Clone the HarmonyOS app
+        run: |
+          git clone --depth 1 https://github.com/liyan-lucky/rustdesk_harmonyos.git src/harmonyos
+          git -C src/harmonyos log --oneline -1
+      - name: Install HarmonyOS SDK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SDK_BASE="$HOME/harmonyos-sdk"
+          rm -rf "$SDK_BASE"; mkdir -p "$SDK_BASE" "$RUNNER_TEMP/sdkx"
+          gh release download commandline-tools-26.0.0.851 \
+            --repo cxxzhang/harmonyos-sdk \
+            --pattern 'commandline-tools-linux-x64-*.zip' \
+            --dir "$RUNNER_TEMP"
+          unzip -q "$RUNNER_TEMP"/commandline-tools-linux-x64-*.zip -d "$RUNNER_TEMP/sdkx"
+          # The archive's top level is command-line-tools/; the build wants a
+          # root that contains openharmony/ and hms/.
+          ROOT="$(dirname "$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name openharmony -print -quit)")"
+          [ -n "$ROOT" ] || { echo "no SDK root found"; find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d | head -30; exit 1; }
+          cp -r "$ROOT"/. "$SDK_BASE"/
+          echo "SDK_ROOT=$SDK_BASE" >> "$GITHUB_ENV"
+          echo "DEVECO_SDK_HOME=$SDK_BASE" >> "$GITHUB_ENV"
+          echo "OHOS_HVIGOR_SDK_ROOT=$SDK_BASE" >> "$GITHUB_ENV"
+          echo "$SDK_BASE/command-line-tools/bin" >> "$GITHUB_PATH"
+          echo "$SDK_BASE/command-line-tools/ohpm/bin" >> "$GITHUB_PATH"
+          ls -la "$SDK_BASE"
+      - name: Build HAP
+        working-directory: src/harmonyos
+        env:
+          SKIP_PACKAGE_VERIFY: 'true'
+        run: |
+          # The repo ships its own Linux build script, which knows where the
+          # SDK's hvigor/ohpm live and patches hvigor for a headless runner.
+          bash scripts/github_build_harmonyos_linux.sh
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find src/harmonyos -type f -name '*.hap' -exec cp {} dist/ \; 2>/dev/null || true
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with: { name: rustdesk-client-harmonyos, path: dist/, if-no-files-found: warn }
