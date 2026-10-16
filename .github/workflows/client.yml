@@ -14,11 +14,11 @@
 # red macOS job should not hide a green Linux one.
 name: client
 
+# Disabled: the official RustDesk client is used as-is (pointed at our server),
+# so there is nothing to compile. Kept for reference only — `on:` is emptied so
+# it cannot run.
 on:
-  push:
-    branches: [main]
-    paths: ['scripts/**', 'patches/**', '.github/workflows/client.yml']
-  workflow_dispatch:
+  # push: ... removed on purpose
     inputs:
       flutter_version:
         description: Flutter SDK version
