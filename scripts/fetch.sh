@@ -55,7 +55,10 @@ apply_patches() {
   fi
   for p in "${patches[@]}"; do
     log "applying $(basename "$p")"
-    git -C "$dest" apply --3way "$p" || {
+    # NOT --3way: that needs the target files in the index, and hbb_common is a
+    # gitlink (mode 160000) there, so git reports "does not exist in index".
+    # A plain apply edits the working tree, which is all the build needs.
+    git -C "$dest" apply "$p" || {
       echo "!! failed to apply $(basename "$p")" >&2
       return 1
     }
