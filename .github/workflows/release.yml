@@ -1,0 +1,87 @@
+# Cut a release: run every build, then attach all artifacts to a GitHub Release.
+#
+# Triggered by a tag (`v1.0.0`) or by hand with a version string. The tag path is
+# the normal one — `git tag v1.0.0 && git push --tags` produces a release with
+# every platform's binaries attached, no artifact-hunting in the UI.
+#
+# Each build is a `workflow_call`, so this file stays a manifest of what a
+# release contains rather than a fourth copy of the build steps.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0). Leave blank to use the run number.'
+        required: false
+
+permissions:
+  contents: write   # needed to create the Release and upload assets
+
+jobs:
+  server:
+    uses: ./.github/workflows/server.yml
+  web:
+    uses: ./.github/workflows/web.yml
+  console:
+    uses: ./.github/workflows/console.yml
+  client:
+    uses: ./.github/workflows/client.yml
+
+  publish:
+    name: publish release
+    needs: [server, web, console, client]
+    # `always()` so a single flaky client platform does not withhold the
+    # release: whatever built is worth shipping, and the gap is visible in the
+    # run summary.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME}"
+          else
+            V="${{ inputs.version }}"
+            [ -z "$V" ] && V="v0.0.0-run${{ github.run_number }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "releasing $V"
+
+      - name: Download every artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten
+        run: |
+          mkdir -p release
+          # One directory per artifact, flattened into files named after it, so
+          # the same filename from two platforms cannot clobber the other.
+          for d in artifacts/*/; do
+            name="$(basename "$d")"
+            mkdir -p "release/$name"
+            cp -r "$d". "release/$name/" 2>/dev/null || true
+          done
+          # Also a flat copy for convenience, keeping the artifact prefix.
+          find artifacts -type f | while read -r f; do
+            rel="${f#artifacts/}"
+            cp "$f" "release/${rel//\//__}"
+          done
+          ls -la release | head -40
+          du -sh release
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.version }}
+          name: RustDesk build ${{ steps.v.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          fail_on_unmatched_files: false
+          files: release/*

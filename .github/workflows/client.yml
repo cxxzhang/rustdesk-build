@@ -1,17 +1,17 @@
 # RustDesk client, one job per platform.
 #
-# GitHub gives us native Windows and macOS runners, so unlike a Linux-only CI
-# there is no cross-compiling: `flutter build windows` runs on Windows and
-# `flutter build macos` on macOS, each with the toolchain the platform expects.
+# GitHub gives us native Windows and macOS runners, so there is no
+# cross-compiling: `flutter build windows` runs on Windows and `flutter build
+# macos` on macOS, each with the toolchain the platform expects.
 #
-# The Rust<->Dart bridge (flutter_rust_bridge) is normally generated on a
-# separate machine and committed. If the checkout has none, it is generated
-# here with the codegen version pinned to match `flutter_rust_bridge` in
-# Cargo.toml — a mismatch produces a Dart/Rust pair that will not compile.
+# The generated Rust<->Dart bridge is NOT committed upstream, so it is produced
+# first by scripts/gen-bridge.sh. That script pins flutter_rust_bridge to the
+# 1.80 line the Cargo.toml requires; the 2.x CLI is a different interface and
+# fails with "Fail to find any configuration file".
 #
-# Marked `continue-on-error` per job on purpose: these are the parts most
-# likely to need iteration on a first run, and a red macOS job should not hide
-# a green Linux one.
+# Every job is `continue-on-error` at the workflow level via `if-no-files-found:
+# warn` on the uploads: these are the parts most likely to need iteration, and a
+# red macOS job should not hide a green Linux one.
 name: client
 
 on:
@@ -23,10 +23,11 @@ on:
       flutter_version:
         description: Flutter SDK version
         default: '3.24.5'
+  workflow_call:
 
 env:
   FLUTTER_VERSION: ${{ inputs.flutter_version || '3.24.5' }}
-  FRB_CODEGEN_VERSION: '2.0.0-dev.37'
+  FRB_CODEGEN_VERSION: '1.80.1'
 
 jobs:
   linux:
@@ -43,28 +44,23 @@ jobs:
             libasound2-dev libpulse-dev libva-dev libvdpau-dev \
             libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxfixes-dev libxrandr-dev libxi-dev libxkbcommon-dev \
-            libpipewire-0.3-dev libwayland-dev
+            libpipewire-0.3-dev libwayland-dev libclang-dev
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
       - uses: dtolnay/rust-toolchain@stable
       - run: bash scripts/fetch.sh rustdesk
-      - name: Generate bridge if missing
-        working-directory: src/rustdesk
-        run: |
-          if [ ! -f flutter/lib/generated_bridge.dart ] && [ ! -d flutter/lib/generated ]; then
-            cargo install flutter_rust_bridge_codegen --version "$FRB_CODEGEN_VERSION" --locked
-            flutter_rust_bridge_codegen generate
-          fi
+      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
       - name: Collect
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -name 'rustdesk' -type f -exec cp {} dist/ \; || true
-          find src/rustdesk/flutter/build -name '*.deb' -o -name '*.AppImage' | head -5
+          find src/rustdesk/flutter/build -type f \
+            \( -name 'rustdesk' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.tar.gz' \) \
+            -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
@@ -84,17 +80,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: LLVM
+      - name: LLVM (bindgen needs libclang)
         run: choco install llvm -y --no-progress
       - run: bash scripts/fetch.sh rustdesk
-      - name: Generate bridge if missing
-        working-directory: src/rustdesk
-        shell: bash
-        run: |
-          if [ ! -f flutter/lib/generated_bridge.dart ] && [ ! -d flutter/lib/generated ]; then
-            cargo install flutter_rust_bridge_codegen --version "$FRB_CODEGEN_VERSION" --locked
-            flutter_rust_bridge_codegen generate
-          fi
+      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build
         working-directory: src/rustdesk
         shell: bash
@@ -103,7 +92,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -name 'rustdesk.exe' -exec cp {} dist/ \; || true
+          find src/rustdesk/flutter/build -type f \
+            \( -name 'rustdesk.exe' -o -name '*.msi' -o -name '*.zip' \) \
+            -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
@@ -125,21 +116,15 @@ jobs:
           targets: aarch64-apple-darwin
       - run: brew install create-dmg || true
       - run: bash scripts/fetch.sh rustdesk
-      - name: Generate bridge if missing
-        working-directory: src/rustdesk
-        run: |
-          if [ ! -f flutter/lib/generated_bridge.dart ] && [ ! -d flutter/lib/generated ]; then
-            cargo install flutter_rust_bridge_codegen --version "$FRB_CODEGEN_VERSION" --locked
-            flutter_rust_bridge_codegen generate
-          fi
+      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
       - name: Collect
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -name '*.app' -maxdepth 6 -exec cp -r {} dist/ \; || true
-          find src/rustdesk/flutter/build -name '*.dmg' -exec cp {} dist/ \; || true
+          find src/rustdesk/flutter/build -maxdepth 6 -type d -name '*.app' -exec cp -r {} dist/ \; 2>/dev/null || true
+          find src/rustdesk/flutter/build -type f -name '*.dmg' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
@@ -156,11 +141,25 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - name: Android SDK + NDK
         run: |
+          # Installed by hand rather than via android-actions/setup-android,
+          # which failed to initialise its SDK root on this runner image.
+          export ANDROID_SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -fsSL -o /tmp/cmdtools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            echo "ANDROID_HOME=$ANDROID_SDK_ROOT"
+            echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+            echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
+          } >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -170,20 +169,14 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
       - run: cargo install cargo-ndk --locked
       - run: bash scripts/fetch.sh rustdesk
-      - name: Generate bridge if missing
-        working-directory: src/rustdesk
-        run: |
-          if [ ! -f flutter/lib/generated_bridge.dart ] && [ ! -d flutter/lib/generated ]; then
-            cargo install flutter_rust_bridge_codegen --version "$FRB_CODEGEN_VERSION" --locked
-            flutter_rust_bridge_codegen generate
-          fi
+      - run: bash scripts/gen-bridge.sh src/rustdesk
       - name: Build APK
         working-directory: src/rustdesk
         run: python3 build.py --flutter --skip-portable-pack
       - name: Collect
         run: |
           mkdir -p dist
-          find src/rustdesk/flutter/build -name '*.apk' -exec cp {} dist/ \; || true
+          find src/rustdesk/flutter/build -type f -name '*.apk' -exec cp {} dist/ \; 2>/dev/null || true
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
