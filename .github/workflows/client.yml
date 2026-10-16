@@ -116,7 +116,7 @@ jobs:
         with: { channel: stable, flutter-version: '${{ env.FLUTTER_VERSION }}', cache: true }
       - name: Build
         working-directory: src/rustdesk
-        run: python3 build.py --flutter --skip-portable-pack
+        run: python3 build.py --flutter
       - name: Collect
         run: |
           mkdir -p dist
@@ -145,7 +145,7 @@ jobs:
       - name: Build
         working-directory: src/rustdesk
         shell: bash
-        run: python build.py --flutter --skip-portable-pack
+        run: python build.py --portable --flutter --skip-portable-pack --hwcodec
       - name: Collect
         shell: bash
         run: |
@@ -174,7 +174,7 @@ jobs:
       - run: brew install create-dmg nasm yasm || true
       - name: Build
         working-directory: src/rustdesk
-        run: python3 build.py --flutter --skip-portable-pack
+        run: python3 build.py --flutter --hwcodec --unix-file-copy-paste
       - name: Collect
         run: |
           mkdir -p dist
@@ -219,8 +219,10 @@ jobs:
             echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
             echo "ANDROID_HOME=$ANDROID_SDK_ROOT"
             echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}"
-            echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
           } >> "$GITHUB_ENV"
+          # A bare path must go to GITHUB_PATH, not GITHUB_ENV — writing it to
+          # the env file makes the runner reject the whole block.
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '${{ env.RUST_VERSION }}'
@@ -233,7 +235,7 @@ jobs:
       - run: cargo install cargo-ndk --version 3.1.2 --locked
       - name: Build
         working-directory: src/rustdesk
-        run: python3 build.py --flutter --skip-portable-pack
+        run: python3 build.py --flutter
       - name: Collect
         run: |
           mkdir -p dist
@@ -302,16 +304,22 @@ jobs:
           git -C src/harmonyos log --oneline -1
       - name: Install HarmonyOS SDK
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Huawei's command-line-tools archive is 2.3 GB, over GitHub's 2 GiB
+          # release-asset limit, so it cannot be mirrored here. The signed
+          # download URL (valid ~10 years) lives in a secret instead: the runner
+          # fetches straight from Huawei and nothing is re-hosted.
+          SDK_URL: ${{ secrets.HARMONYOS_SDK_URL }}
         run: |
           set -euo pipefail
+          if [ -z "${SDK_URL:-}" ]; then
+            echo "HARMONYOS_SDK_URL secret is not set — cannot build HarmonyOS." >&2
+            exit 1
+          fi
           SDK_BASE="$HOME/harmonyos-sdk"
           rm -rf "$SDK_BASE"; mkdir -p "$SDK_BASE" "$RUNNER_TEMP/sdkx"
-          gh release download commandline-tools-26.0.0.851 \
-            --repo cxxzhang/harmonyos-sdk \
-            --pattern 'commandline-tools-linux-x64-*.zip' \
-            --dir "$RUNNER_TEMP"
-          unzip -q "$RUNNER_TEMP"/commandline-tools-linux-x64-*.zip -d "$RUNNER_TEMP/sdkx"
+          curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/sdk.zip" "$SDK_URL"
+          ls -la "$RUNNER_TEMP/sdk.zip"
+          unzip -q "$RUNNER_TEMP/sdk.zip" -d "$RUNNER_TEMP/sdkx"
           # The archive's top level is command-line-tools/; the build wants a
           # root that contains openharmony/ and hms/.
           ROOT="$(dirname "$(find "$RUNNER_TEMP/sdkx" -maxdepth 3 -type d -name openharmony -print -quit)")"
