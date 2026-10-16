@@ -1,0 +1,67 @@
+# The browser client (npm) and its bundled TURN server (Go).
+name: web
+
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', '.github/workflows/web.yml']
+  workflow_dispatch:
+
+jobs:
+  client:
+    name: browser client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch
+        run: bash scripts/fetch.sh webclient
+      - name: Install and build
+        working-directory: src/rustdesk-webclient
+        run: |
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run gen
+          npm run build
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp -r src/rustdesk-webclient/dist/. dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-webclient
+          path: dist/
+          if-no-files-found: error
+
+  turn:
+    name: TURN server
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, ext: '' }
+          - { goos: linux,   goarch: arm64, ext: '' }
+          - { goos: windows, goarch: amd64, ext: '.exe' }
+          - { goos: darwin,  goarch: arm64, ext: '' }
+          - { goos: darwin,  goarch: amd64, ext: '' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: bash scripts/fetch.sh webclient
+      - name: Build
+        working-directory: src/rustdesk-webclient/tools/turnserver
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          go build -trimpath -ldflags "-s -w" \
+            -o "$GITHUB_WORKSPACE/dist/rustdesk-turn-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-turn-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/

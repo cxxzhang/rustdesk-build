@@ -1,0 +1,69 @@
+# The console: Go backend (cross-compiles everywhere with CGO_ENABLED=0) and
+# the Vue admin as static files.
+name: console
+
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'patches/**', '.github/workflows/console.yml']
+  workflow_dispatch:
+
+jobs:
+  backend:
+    name: backend ${{ matrix.suffix }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, suffix: linux-amd64 }
+          - { goos: linux,   goarch: arm64, suffix: linux-arm64 }
+          - { goos: windows, goarch: amd64, suffix: windows-amd64.exe }
+          - { goos: darwin,  goarch: arm64, suffix: darwin-arm64 }
+          - { goos: darwin,  goarch: amd64, suffix: darwin-amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: bash scripts/fetch.sh api-server-pro
+      - name: Build
+        working-directory: src/rustdesk-api-server-pro/backend
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          go build -trimpath -ldflags "-s -w" \
+            -o "$GITHUB_WORKSPACE/dist/rustdesk-api-server-${{ matrix.suffix }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-console-${{ matrix.suffix }}
+          path: dist/
+
+  frontend:
+    name: admin UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: bash scripts/fetch.sh api-server-pro
+      - run: npm i -g pnpm@9 --no-audit --no-fund
+      - name: Build admin UI
+        working-directory: src/rustdesk-api-server-pro/soybean-admin
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+          pnpm build
+      - name: Package
+        run: |
+          mkdir -p dist/api
+          cp -r src/rustdesk-api-server-pro/soybean-admin/dist/. dist/api/
+          cp src/rustdesk-api-server-pro/server-dist/start.bat dist/api/ 2>/dev/null || true
+          cp src/rustdesk-api-server-pro/server-dist/server.yaml dist/api/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-console-ui
+          path: dist/

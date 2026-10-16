@@ -1,0 +1,536 @@
+From da1724f71f5c7803fc1a628f3daab96f7a2023ac Mon Sep 17 00:00:00 2001
+From: andesk <build@andesk.local>
+Date: Fri, 16 Oct 2026 09:57:03 +0800
+Subject: [PATCH] patches: WebRTC signalling needs a rendezvous key exchange in
+ hbbs
+
+Upstream's controlled peer emits NO WebRTC signalling (SDP answer, ICE
+candidates) until the rendezvous server has run a key exchange:
+rendezvous_mediator.rs:718 and :950 call secure_tcp_required and DROP the
+signalling on failure rather than send it in the clear. Upstream hbbs has never
+implemented that exchange (git log --all -SKeyExchange -- src/ is empty), so
+WebRTC cannot work against a self-hosted server at all: the peer builds a valid
+answer, fails to encrypt the leg carrying it, and falls back to the relay.
+
+Three changes, all in hbbs.
+
+1. Key exchange (accept_key_exchange). The server speaks first. A peer that
+   secures a connection blocks waiting for our KeyExchange and sends nothing,
+   while a controller speaks first, so a connection silent for 500ms gets one
+   offered. Signs KX_PARAMS_DOMAIN + KxParams{our ephemeral X25519 pk,
+   version 0} with the hbbs Ed25519 key, then opens the sealed symmetric key the
+   peer returns. Both directions then run secretbox (BytesCodec::set_crypt_key,
+   nonce = per-direction incrementing LE u64). Only version 0 (one key both
+   ways) is offered: this tree's hbb_common predates v1, and the client's
+   kx_version_for picks the lower of the two.
+
+2. PunchHoleResponse and RelayResponse must carry webrtc_sdp_answer. Upstream
+   copies neither field, so the answer never reaches the controller.
+
+3. The IceCandidate branch must return true, and trickled candidates must use a
+   send that does not take the controller's sink out of tcp_punch
+   (send_to_tcp_keep). Upstream returns the default false, which breaks the read
+   loop and closes the controller's socket after the first candidate; plain
+   send_to_tcp removes the sink, stranding every later candidate.
+
+Supporting schema and codec work, also here:
+  libs/hbb_common/protos/rendezvous.proto  KeyExchange.version and
+      .signed_params, plus a new KxParams. KeyExchange is already at field 25
+      upstream, so no field renumbering.
+  libs/hbb_common/src/tcp.rs               KX_PARAMS_DOMAIN
+  libs/hbb_common/src/bytes_codec.rs       read and write secretbox for a
+      secured connection
+
+This tree's hbb_common cannot simply be bumped to the newer upstream that has
+these helpers: 1ee667e..229b904 removes about 4900 lines (fs.rs, message.proto
+and platform/* move to other crates), so the exchange is implemented here
+against the older submodule.
+---
+ libs/hbb_common/protos/rendezvous.proto |  29 +++-
+ libs/hbb_common/src/bytes_codec.rs      |  80 ++++++++++-
+ libs/hbb_common/src/tcp.rs              |   5 +
+ src/rendezvous_server.rs                | 178 ++++++++++++++++++++++--
+ 4 files changed, 281 insertions(+), 11 deletions(-)
+
+diff --git a/libs/hbb_common/protos/rendezvous.proto b/libs/hbb_common/protos/rendezvous.proto
+index b2e5c01..0bc158c 100644
+--- a/libs/hbb_common/protos/rendezvous.proto
++++ b/libs/hbb_common/protos/rendezvous.proto
+@@ -29,6 +29,7 @@ message PunchHoleRequest {
+   int32 upnp_port = 9;
+   bytes socket_addr_v6 = 10;
+   string switch_code = 11;
++  string webrtc_sdp_offer = 12;
+ }
+ 
+ message ControlPermissions {
+@@ -64,6 +65,8 @@ message PunchHole {
+   bytes socket_addr_v6 = 7;
+   ControlPermissions control_permissions = 8;
+   ControlledContext controlled_context = 9;
++  string webrtc_sdp_offer = 10;
++  reserved 11;
+ }
+ 
+ message TestNatRequest {
+@@ -90,6 +93,7 @@ message PunchHoleSent {
+   string version = 5;
+   int32 upnp_port = 6;
+   bytes socket_addr_v6 = 7;
++  string webrtc_sdp_answer = 8;
+ }
+ 
+ message RegisterPk {
+@@ -135,6 +139,7 @@ message PunchHoleResponse {
+   bool is_udp = 9;
+   int32 upnp_port = 10;
+   bytes socket_addr_v6 = 11;
++  string webrtc_sdp_answer = 12;
+ }
+ 
+ message ConfigUpdate {
+@@ -169,6 +174,7 @@ message RelayResponse {
+   int32 feedback = 9;
+   bytes socket_addr_v6 = 10;
+   int32 upnp_port = 11;
++  string webrtc_sdp_answer = 12;
+ }
+ 
+ message SoftwareUpdate { string url = 1; }
+@@ -214,7 +220,20 @@ message OnlineResponse {
+ }
+ 
+ message KeyExchange {
+-  repeated bytes keys = 1; 
++  repeated bytes keys = 1;
++  // From the server: the newest key exchange version it speaks. From the client: the version it
++  // picked, the highest both speak. Absent, i.e. 0, is the original scheme.
++  uint32 version = 2;
++  // Server signature of KxParams. Bit 255 of the signed X25519 public key requires this field;
++  // legacy keys leave it clear.
++  bytes signed_params = 3;
++}
++
++// Signed by the server beside its ephemeral public key: that key as it went out, so the signature
++// belongs to this exchange alone, and the newest key exchange version the server speaks.
++message KxParams {
++  bytes pk = 1;
++  uint32 version = 2;
+ }
+ 
+ message HealthCheck {
+@@ -240,6 +259,13 @@ message HttpProxyResponse {
+   string error = 4;
+ }
+ 
++message IceCandidate {
++  string id = 1;
++  bytes socket_addr = 2;
++  string session_key = 3;
++  string candidate = 4;
++}
++
+ message RendezvousMessage {
+   oneof union {
+     RegisterPeer register_peer = 6;
+@@ -265,5 +291,6 @@ message RendezvousMessage {
+     HealthCheck hc = 26;
+     HttpProxyRequest http_proxy_request = 27;
+     HttpProxyResponse http_proxy_response = 28;
++    IceCandidate ice_candidate = 29;
+   }
+ }
+diff --git a/libs/hbb_common/src/bytes_codec.rs b/libs/hbb_common/src/bytes_codec.rs
+index cbd53d9..7c62a6f 100644
+--- a/libs/hbb_common/src/bytes_codec.rs
++++ b/libs/hbb_common/src/bytes_codec.rs
+@@ -1,4 +1,5 @@
+ use bytes::{Buf, BufMut, Bytes, BytesMut};
++use sodiumoxide::crypto::secretbox;
+ use std::io;
+ use tokio_util::codec::{Decoder, Encoder};
+ 
+@@ -10,6 +11,55 @@ pub struct BytesCodec {
+     state: DecodeState,
+     raw: bool,
+     max_packet_length: usize,
++    // Both directions of the rendezvous key exchange. A peer that runs it (the connections that
++    // carry the WebRTC answer and ICE candidates do, see rustdesk `secure_tcp_required`) encrypts
++    // everything it sends from then on and expects everything it receives the same way. The frame
++    // body has to be opened and sealed here, in the codec, so the nonce counters advance exactly
++    // as the peer's do.
++    decrypt: Option<Crypt>,
++    encrypt: Option<Crypt>,
++}
++
++/// One direction of a rendezvous key exchange, matching `Encrypt` in `tcp.rs`: same key and nonce
++/// layout. The key is kept as bytes rather than a `secretbox::Key` so this stays `Copy`, which
++/// `BytesCodec` is.
++#[derive(Debug, Clone, Copy)]
++struct Crypt {
++    key: [u8; secretbox::KEYBYTES],
++    seq: u64,
++}
++
++impl Crypt {
++    fn open(&mut self, bytes: &mut BytesMut) -> io::Result<()> {
++        // An empty frame is left as-is: the counter only advances for a body that is there,
++        // and `Encrypt::dec` skips the same case.
++        if bytes.len() <= 1 {
++            return Ok(());
++        }
++        self.seq += 1;
++        match secretbox::open(bytes, &self.nonce(), &secretbox::Key(self.key)) {
++            Ok(plain) => {
++                bytes.clear();
++                bytes.put_slice(&plain);
++                Ok(())
++            }
++            Err(()) => Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "decryption error",
++            )),
++        }
++    }
++
++    fn seal(&mut self, data: &[u8]) -> Vec<u8> {
++        self.seq += 1;
++        secretbox::seal(data, &self.nonce(), &secretbox::Key(self.key))
++    }
++
++    fn nonce(&self) -> secretbox::Nonce {
++        let mut nonce = secretbox::Nonce([0u8; secretbox::NONCEBYTES]);
++        nonce.0[..std::mem::size_of_val(&self.seq)].copy_from_slice(&self.seq.to_le_bytes());
++        nonce
++    }
+ }
+ 
+ #[derive(Debug, Clone, Copy)]
+@@ -30,9 +80,22 @@ impl BytesCodec {
+             state: DecodeState::Head,
+             raw: false,
+             max_packet_length: usize::MAX,
++            decrypt: None,
++            encrypt: None,
+         }
+     }
+ 
++    /// Turn on both directions of the key exchange with `key`, for a peer that secured this
++    /// connection. Nothing is sent before this is called, so the send counter starts at zero.
++    pub fn set_crypt_key(&mut self, key: secretbox::Key) {
++        let crypt = Crypt {
++            key: key.0,
++            seq: 0,
++        };
++        self.decrypt = Some(crypt);
++        self.encrypt = Some(crypt);
++    }
++
+     pub fn set_raw(&mut self) {
+         self.raw = true;
+     }
+@@ -106,8 +169,11 @@ impl Decoder for BytesCodec {
+         };
+ 
+         match self.decode_data(n, src)? {
+-            Some(data) => {
++            Some(mut data) => {
+                 self.state = DecodeState::Head;
++                if let Some(decrypt) = self.decrypt.as_mut() {
++                    decrypt.open(&mut data)?;
++                }
+                 Ok(Some(data))
+             }
+             None => Ok(None),
+@@ -124,6 +190,18 @@ impl Encoder<Bytes> for BytesCodec {
+             buf.put(data);
+             return Ok(());
+         }
++        if let Some(encrypt) = self.encrypt.as_mut() {
++            let sealed = encrypt.seal(&data);
++            return self.encode_sealed(Bytes::from(sealed), buf);
++        }
++        self.encode_sealed(data, buf)
++    }
++}
++
++impl BytesCodec {
++    /// The length-prefix frame, split out so an encrypted body goes through exactly the same
++    /// framing as a plaintext one.
++    fn encode_sealed(&self, data: Bytes, buf: &mut BytesMut) -> Result<(), io::Error> {
+         if data.len() <= 0x3F {
+             buf.put_u8((data.len() << 2) as u8);
+         } else if data.len() <= 0x3FFF {
+diff --git a/libs/hbb_common/src/tcp.rs b/libs/hbb_common/src/tcp.rs
+index 2296edb..d6bfb71 100644
+--- a/libs/hbb_common/src/tcp.rs
++++ b/libs/hbb_common/src/tcp.rs
+@@ -24,6 +24,11 @@ use tokio_util::codec::Framed;
+ pub trait TcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
+ pub struct DynTcpStream(pub Box<dyn TcpStreamTrait + Send + Sync>);
+ 
++/// Prefix of what the server signs as `KxParams`. Matches rustdesk `hbb_common::tcp`
++/// (`KX_PARAMS_DOMAIN`): the same key signs other messages and a protobuf carries no type of its
++/// own, so this is what keeps them apart. The server side signs it in `src/rendezvous_server.rs`.
++pub const KX_PARAMS_DOMAIN: &[u8] = b"rdkx-params";
++
+ #[derive(Clone)]
+ pub struct Encrypt(pub Key, pub u64, pub u64);
+ 
+diff --git a/src/rendezvous_server.rs b/src/rendezvous_server.rs
+index 78a303d..e7e15eb 100644
+--- a/src/rendezvous_server.rs
++++ b/src/rendezvous_server.rs
+@@ -16,7 +16,7 @@ use hbb_common::{
+         register_pk_response::Result::{TOO_FREQUENT, UUID_MISMATCH},
+         *,
+     },
+-    tcp::FramedStream,
++    tcp::{Encrypt, FramedStream},
+     timeout,
+     tokio::{
+         self,
+@@ -31,7 +31,7 @@ use hbb_common::{
+     AddrMangle, ResultType,
+ };
+ use ipnetwork::Ipv4Network;
+-use sodiumoxide::crypto::sign;
++use sodiumoxide::crypto::{box_, sign};
+ use std::{
+     collections::{HashMap, VecDeque},
+     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+@@ -569,8 +569,49 @@ impl RendezvousServer {
+                             rr.relay_server = self.get_relay_server(addr.ip(), addr_b.ip());
+                         }
+                     }
++                    let webrtc = !rr.webrtc_sdp_answer.is_empty();
+                     msg_out.set_relay_response(rr);
+-                    allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
++                    if webrtc {
++                        // A WebRTC answer, here as in `handle_hole_sent`, is followed by trickled
++                        // ICE candidates, so the controller's connection has to stay parked.
++                        // See `send_to_tcp_keep`.
++                        self.send_to_tcp_keep(msg_out, addr_b).await;
++                    } else {
++                        allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
++                    }
++                }
++                Some(rendezvous_message::Union::IceCandidate(ice)) => {
++                    // Trickled ICE candidate, forwarded to the other side of the WebRTC
++                    // session. Two directions, told apart by which routing field is set
++                    // (see rustdesk `src/client.rs` and `src/rendezvous_mediator.rs`):
++                    //   controller -> server: `id` names the controlled peer, socket_addr empty.
++                    //     Reach the peer through its registered mediator connection.
++                    //   controlled -> server: `id` is stale/loopback there, while `socket_addr`
++                    //     carries the controller's punch address (the peer's return route) -
++                    //     the controller's socket is parked in `tcp_punch`, not the peer registry.
++                    if !ice.id.is_empty() {
++                        if let Some(peer) = self.pm.get_in_memory(&ice.id).await {
++                            let mut msg_out = RendezvousMessage::new();
++                            msg_out.set_ice_candidate(ice);
++                            let peer_addr = peer.read().await.socket_addr;
++                            self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
++                        }
++                    } else if !ice.socket_addr.is_empty() {
++                        let addr_b = AddrMangle::decode(&ice.socket_addr);
++                        let mut msg_out = RendezvousMessage::new();
++                        msg_out.set_ice_candidate(ice);
++                        // Unlike a punch response, this is one of a trickle, and the
++                        // controller's channel has to survive all of them: taking the sink out
++                        // of `tcp_punch` on the first candidate would drop every later one, and
++                        // the peer sends one per interface. See `send_to_tcp_keep`.
++                        self.send_to_tcp_keep(msg_out, addr_b).await;
++                    }
++                    // Keep reading: this connection carries the whole trickle and the answer.
++                    // Returning the default `false` here ends the read loop, which closes the
++                    // controller's socket before the peer's answer can reach it. The native
++                    // client opens a fresh connection per candidate, so the upstream server got
++                    // away with it; a browser keeps one socket for the session.
++                    return true;
+                 }
+                 Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
+                     allow_err!(self.handle_hole_sent(phs, addr, None).await);
+@@ -672,14 +713,24 @@ impl RendezvousServer {
+             socket_addr: AddrMangle::encode(addr).into(),
+             pk: self.get_pk(&phs.version, phs.id).await,
+             relay_server: phs.relay_server.clone(),
++            // The controller builds a WebRTC session from this answer; without it the offerer
++            // never leaves `have-local-offer` and the connection times out. See rustdesk
++            // `src/client.rs`, which reads `webrtc_sdp_answer` off the PunchHoleResponse.
++            webrtc_sdp_answer: phs.webrtc_sdp_answer,
+             ..Default::default()
+         };
+         if let Ok(t) = phs.nat_type.enum_value() {
+             p.set_nat_type(t);
+         }
++        let webrtc = !p.webrtc_sdp_answer.is_empty();
+         msg_out.set_punch_hole_response(p);
+         if let Some(socket) = socket {
+             socket.send(&msg_out, addr_a).await?;
++        } else if webrtc {
++            // A WebRTC answer is followed by trickled ICE candidates, so the controller's
++            // connection has to stay parked; taking it here is what `send_to_tcp` does and would
++            // leave the candidates with nowhere to go. See `send_to_tcp_keep`.
++            self.send_to_tcp_keep(msg_out, addr_a).await;
+         } else {
+             self.send_to_tcp(msg_out, addr_a).await;
+         }
+@@ -807,6 +858,10 @@ impl RendezvousServer {
+                     socket_addr,
+                     nat_type: ph.nat_type,
+                     relay_server,
++                    // The controller's WebRTC offer has to reach the controlled peer, which
++                    // builds the answer from it. Without this forward every punch request looks
++                    // punch-only and no WebRTC path is ever attempted.
++                    webrtc_sdp_offer: ph.webrtc_sdp_offer.clone(),
+                     ..Default::default()
+                 });
+             }
+@@ -885,6 +940,23 @@ impl RendezvousServer {
+         Ok(())
+     }
+ 
++    /// Like `send_to_tcp`, but leaves the controller's connection parked in `tcp_punch` so it can
++    /// carry what comes next. Used for trickled ICE, where the peer sends several candidates on a
++    /// connection that has to outlive the first one. The mutex is held across the send, which is
++    /// what keeps two candidates ordered on the wire.
++    async fn send_to_tcp_keep(&mut self, msg: RendezvousMessage, addr: SocketAddr) {
++        let Ok(bytes) = msg.write_to_bytes() else {
++            return;
++        };
++        let mut tcp_punch = self.tcp_punch.lock().await;
++        if let Some(sink) = tcp_punch.get_mut(&try_into_v4(addr)) {
++            match sink {
++                Sink::TcpStream(s) => allow_err!(s.send(Bytes::from(bytes)).await),
++                Sink::Ws(ws) => allow_err!(ws.send(tungstenite::Message::Binary(bytes)).await),
++            }
++        }
++    }
++
+     #[inline]
+     async fn handle_tcp_punch_hole_request(
+         &mut self,
+@@ -1188,7 +1260,7 @@ impl RendezvousServer {
+         key: &str,
+         ws: bool,
+     ) -> ResultType<()> {
+-        let mut sink;
++        let mut sink = None;
+         if ws {
+             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+             let callback = |req: &Request, response: Response| {
+@@ -1226,11 +1298,35 @@ impl RendezvousServer {
+                 }
+             }
+         } else {
+-            let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
+-            sink = Some(Sink::TcpStream(a));
+-            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
+-                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+-                    break;
++            let mut framed = Framed::new(stream, BytesCodec::new());
++            // Who opened this says which of the two it is. A controller speaks first -
++            // PunchHoleRequest, RequestRelay, and the like - and never runs the key exchange. A
++            // controlled peer that secured the connection instead waits for us to start it
++            // before it sends anything, so silence here means offer one. See
++            // `accept_key_exchange`; the wait is short because a controller's first message is
++            // already on the wire.
++            match timeout(500, framed.next()).await {
++                Ok(Some(Ok(first))) => {
++                    let (a, mut b) = framed.split();
++                    sink = Some(Sink::TcpStream(a));
++                    if !self.handle_tcp(&first, &mut sink, addr, key, ws).await {
++                        return Ok(());
++                    }
++                    while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
++                        if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
++                            break;
++                        }
++                    }
++                }
++                _ => {
++                    if self.accept_key_exchange(&mut framed).await {
++                        let (_a, mut b) = framed.split();
++                        while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
++                            if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
++                                break;
++                            }
++                        }
++                    }
+                 }
+             }
+         }
+@@ -1241,6 +1337,70 @@ impl RendezvousServer {
+         Ok(())
+     }
+ 
++    /// Offer the rendezvous key exchange on a fresh connection and, if the peer takes it, turn on
++    /// encryption for the rest of it. Returns whether that happened.
++    ///
++    /// The server speaks first: a peer that secures a connection to it (the ones carrying the
++    /// WebRTC answer and ICE candidates do, see rustdesk `secure_tcp_required`) blocks waiting for
++    /// this `KeyExchange` and never sends its own first. A peer that does not run the exchange
++    /// just never replies, `next()` times out, and the connection carries on in the clear.
++    ///
++    /// The message proves ownership of the address the peer already knows as this server's public
++    /// key, by signing our ephemeral X25519 public key with our Ed25519 signing key, and carries
++    /// the sealed symmetric key, matching rustdesk `src/common.rs` `key_exchange`.
++    ///
++    /// Only the original scheme (version 0, one key both ways) is offered, because this build's
++    /// `hbb_common` predates version 1. A client that speaks a newer version still picks the
++    /// lower of the two (`kx_version_for`), so it runs version 0 and agrees with us.
++    async fn accept_key_exchange<S>(&self, framed: &mut Framed<S, BytesCodec>) -> bool
++    where
++        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
++    {
++        let Some(sk) = self.inner.sk.as_ref() else {
++            return false;
++        };
++        let (our_pk_b, our_sk_b) = box_::gen_keypair();
++        let params = KxParams {
++            pk: our_pk_b.0.to_vec().into(),
++            version: 0,
++            ..Default::default()
++        };
++        let mut payload = hbb_common::tcp::KX_PARAMS_DOMAIN.to_vec();
++        payload.extend_from_slice(&params.write_to_bytes().unwrap_or_default());
++        let msg_out = RendezvousMessage {
++            union: Some(rendezvous_message::Union::KeyExchange(KeyExchange {
++                keys: vec![sign::sign(&our_pk_b.0, sk).into()],
++                version: 0,
++                signed_params: sign::sign(&payload, sk).into(),
++                ..Default::default()
++            })),
++            ..Default::default()
++        };
++        let Ok(bytes) = msg_out.write_to_bytes() else {
++            return false;
++        };
++        if framed.send(Bytes::from(bytes)).await.is_err() {
++            return false;
++        }
++        let Ok(Some(Ok(reply))) = timeout(30_000, framed.next()).await else {
++            return false;
++        };
++        let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&reply) else {
++            return false;
++        };
++        let Some(rendezvous_message::Union::KeyExchange(ex)) = msg_in.union else {
++            return false;
++        };
++        if ex.keys.len() != 2 {
++            return false;
++        }
++        let Ok(key) = Encrypt::decode(&ex.keys[1], &ex.keys[0], &our_sk_b) else {
++            return false;
++        };
++        framed.codec_mut().set_crypt_key(key);
++        true
++    }
++
+     #[inline]
+     async fn get_pk(&mut self, version: &str, id: String) -> Bytes {
+         if version.is_empty() || self.inner.sk.is_none() {
+-- 
+2.52.0.windows.1
+

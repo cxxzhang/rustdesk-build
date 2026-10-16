@@ -1,75 +1,71 @@
-# andesk-build
+# rustdesk-build
 
-AnDesk 的构建流水线。这个仓库本身不含源码 —— 它把 [AnDesk 的几个源码仓库][repos]
-拉下来、编译、把产物作为构件上传。
+构建流水线。这个仓库**不含源码** —— 它把源码拉下来、打补丁、编译，产物作为
+Actions artifact 上传。
 
-[repos]: https://gitcode.com/rustzhang
+用 GitHub Actions，因为它是唯一同时提供 **Linux / Windows / macOS** 托管 runner
+的免费 CI：客户端要在 Windows 和 macOS 上原生编译，别的平台给不了。
+
+## 仓库结构
+
+**只有一个自建源码仓库**：[`rustdesk-webclient`](https://github.com/cxxzhang/rustdesk-webclient)。
+
+其余三个组件都是「**上游 + 补丁**」，不另建仓库 —— 构建时按补丁对应的上游 commit
+clone，再 `git apply` 打补丁：
+
+| 组件 | 上游 | 固定 commit |
+|---|---|---|
+| `rustdesk-server` | `rustdesk/rustdesk-server` | `873230e` (1.1.17) |
+| `rustdesk` 客户端 | `rustdesk/rustdesk` | `9997b7a3b` (1.5.1) |
+| `rustdesk-api-server-pro` | `liyan-lucky/rustdesk-api-server-pro` | `1ab27a4` (1.3.20) |
+
+补丁在 `patches/`。上游升级 = 改 `scripts/fetch.sh` 里的 commit 常量 + 可能调整补丁。
+
+> ⚠️ `rustdesk-server` 的补丁会改到 `libs/hbb_common`，而上游把它作为**子模块**。
+> git 不允许透过子模块边界写索引，所以脚本用 `git apply`（直接改工作区）而不是
+> `git am`。构建只需要文件内容，不需要 git 索引。
 
 ## 流水线
 
-| Workflow | 产物 | 状态 |
-|---|---|---|
-| `server.yml` | hbbs / hbbr / rustdesk-utils（linux、windows、macOS） | ✅ 已验证的构建方式 |
-| `web.yml` | 浏览器客户端 + TURN（linux、windows、macOS） | ✅ 已验证的构建方式 |
-| `console.yml` | 控制台后端（4 个平台）+ 管理界面 | ✅ 已验证的构建方式 |
-| `client-android.yml` | RustDesk 客户端 APK | ⚠️ 尽力而为，见下 |
-| `client-windows.yml` | RustDesk 客户端 exe | ⚠️ 尽力而为，见下 |
-
-手动触发：仓库页 → 流水线 → 选一个 workflow → 运行。
-
-## 为什么没有 macOS 客户端 / iOS / OpenHarmony
-
-这三条不是「还没做」，是**做不到**或**上游不支持**：
-
-- **macOS 客户端 / iOS**：两者都必须用 Xcode 编译，而苹果的授权**只允许在苹果硬件上**
-  运行 macOS。GitCode 的托管 runner 只有 Linux（`ubuntu-latest` / `euler-latest`），
-  没有 macOS runner —— 所以这两个平台**在托管 runner 上无解**。
-  要出包只能自建 macOS runner（`runs-on: [self-hosted, macos]`）。
-  （服务端和 TURN 的 macOS 版**可以**交叉编译，已在 `server.yml` / `web.yml` 里做了。）
-- **OpenHarmony**：上游 RustDesk **完全没有鸿蒙支持** —— 仓库里搜不到 `ohos` /
-  `openharmony` / `harmony` 任何痕迹。这是个从零移植的工程（Rust 后端、Flutter 前端、
-  屏幕采集、输入注入全都要新平台实现），不是加个 CI 就能出来的。
-
-## 需要配置的密钥
-
-仓库 → 设置 → 密钥，添加：
-
-| 名称 | 用途 |
+| Workflow | 产物 |
 |---|---|
-| `GITCODE_TOKEN` | 拉取那几个**私有**源码仓库。用你的 GitCode 访问令牌。 |
+| `server.yml` | hbbs / hbbr / rustdesk-utils —— linux(x64/arm64)、windows、macOS(arm64/x64) |
+| `web.yml` | 浏览器客户端 + TURN（linux/win/macOS × amd64/arm64） |
+| `console.yml` | 控制台后端（5 平台）+ 管理界面 |
+| `client.yml` | RustDesk 客户端 —— **linux / windows / macos / android 各用原生 runner** |
 
-没有这个，所有流水线在第一步「拉取源码」就会失败。
+手动触发：仓库 → Actions → 选 workflow → Run workflow。
 
-## 平台支持的真实情况
+## 平台支持
 
 | 组件 | Linux | Windows | macOS | Android | OpenHarmony |
 |---|---|---|---|---|---|
-| 服务端 (hbbs/hbbr) | ✅ | ✅ 交叉编译 | ✅ 交叉编译 | — | — |
-| 浏览器客户端 | ✅ | ✅（静态文件） | ✅（静态文件） | ✅（就是网页） | — |
-| TURN | ✅ | ✅ 交叉编译 | ✅ 交叉编译 | — | — |
-| 控制台后端 | ✅ | ✅ 交叉编译 | ✅ 交叉编译 | — | — |
-| RustDesk 客户端 | ✅ | ⚠️ 见下 | ❌ 需 macOS | ⚠️ 见下 | ❌ 上游不支持 |
+| 服务端 | ✅ | ✅ | ✅ | — | — |
+| 浏览器客户端 | ✅ | ✅ | ✅ | ✅（就是网页） | — |
+| TURN | ✅ | ✅ | ✅ | — | — |
+| 控制台后端 | ✅ | ✅ | ✅ | — | — |
+| RustDesk 客户端 | ✅ | ✅ | ✅ | ✅ | ❌ |
 
-「交叉编译」= 在 Linux runner 上产出目标平台的二进制，不需要那个平台的机器。
-Go 用 `GOOS/GOARCH`，Rust 用 `--target`（服务端无 C 依赖，所以简单）。
+**OpenHarmony 没有**：上游 RustDesk 完全没有鸿蒙支持（仓库里搜不到 `ohos` /
+`openharmony` / `harmony`）。那是从零移植（Rust 后端、Flutter 前端、屏幕采集、
+输入注入全都要新平台实现），不是加个 CI 能解决的。
 
-## 客户端构建为什么标「尽力而为」
+**iOS 也没有**：需要 Xcode + 苹果签名证书，且本仓库没做 iOS 的 provisioning 配置。
 
-RustDesk 客户端是这套里最难自动化的，原因有三个，都跟 CI 无关：
+## 客户端构建的已知难点
 
-1. **Rust ↔ Flutter 桥接代码**：`flutter_rust_bridge` 生成的 `bridge_generated.rs` 和
-   `generated_bridge.dart` 必须成对，且 codegen 版本要跟 `Cargo.toml` 里的
-   `flutter_rust_bridge` 版本**严格匹配**。上游是在另一台机器生成后**提交进仓库**的，
-   所以 CI 里要么用它已有的，要么重新生成（版本不对就会编译失败）。
-2. **Windows 需要 4 个 C 静态库**：libyuv / opus / libaom / libvpx，必须是
-   **静态 CRT（`/MT`）且不带 `/GL`** —— 否则跟 Rust 那边链接不上。
-   这是最容易崩的一环，`scripts/build-win-clibs.sh` 是尽力而为的复现。
-3. **工具链版本敏感**：Flutter 版本、NDK 版本、codegen 版本三者互相牵制。
+1. **Rust ↔ Dart 桥接**：`flutter_rust_bridge` 生成的 `bridge_generated.rs` 和
+   `generated_bridge.dart` 必须成对，codegen 版本要跟 `Cargo.toml` 里的
+   `flutter_rust_bridge` **严格匹配**。上游是在另一台机器生成后提交的；如果 checkout
+   里没有，workflow 会用 `FRB_CODEGEN_VERSION` 重新生成 —— 版本不对就会编译失败。
+2. **Windows 需要 4 个 C 静态库**（libyuv / opus / libaom / libvpx），必须
+   **静态 CRT `/MT` 且不带 `/GL`**。`scripts/build-win-clibs.sh` 是尽力而为的复现，
+   实际可能由 `build.py` 的 features 机制处理。
+3. **工具链版本敏感**：Flutter / NDK / codegen 三者互相牵制。
 
-所以这两个 workflow 的**结构是对的**（依赖安装、缓存、桥接生成、打包、上传都齐了），
-但**第一次跑很可能要调**。真跑的时候看日志改，比在这里猜准。
+所以 `client.yml` 的四个 job 标了 `if-no-files-found: warn` —— 一个平台失败不该
+掩盖另一个平台成功。**第一次跑大概率要按日志调**。
 
-## 本地构建
+## 本地
 
-同一套东西在本机也能跑（`E:\NetJobs\handoff\build.py`）。这个仓库是把那些步骤
-搬进 CI，不是替代它。
+同一套步骤在本机也能跑：`E:\NetJobs\handoff\build.py`。这个仓库是把它们搬进 CI。

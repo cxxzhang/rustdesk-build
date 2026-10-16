@@ -1,0 +1,164 @@
+From a567df99dff53b54936335341dc311bb372d5db0 Mon Sep 17 00:00:00 2001
+From: andesk <build@andesk.local>
+Date: Fri, 16 Oct 2026 10:09:55 +0800
+Subject: [PATCH] patches: deployment folder, and the dependency build scripts
+ pnpm 10+ blocks
+
+Two unrelated additions, both needed to build and run this on a current machine.
+
+server-dist/{start.bat,server.yaml} is the hand-written Windows deployment: a
+launcher that syncs the DB schema, creates the admin account, then starts the
+server, plus the config it reads. The Go server resolves server.yaml, ./server.db
+and ./dist relative to its working directory (backend/config/config.go:143),
+which is why the launcher cd's to its own folder first. The binary and the
+frontend build are not committed; build.py produces them.
+
+NOTE: server.yaml carries a signKey generated for local testing. Replace it
+before any real deployment.
+
+soybean-admin/pnpm-workspace.yaml gains allowBuilds. pnpm 10 and later do not run
+a dependency's install scripts unless the project allows them, and four of
+soybean-admin's dependencies need theirs: esbuild and vue-demi fetch/select
+platform binaries in postinstall (without which vite build cannot run at all),
+while es5-ext and simple-git-hooks are harmless either way. Generated with
+pnpm approve-builds --all. Without this a clean
+"pnpm install --frozen-lockfile" aborts with ERR_PNPM_IGNORED_BUILDS.
+---
+ server-dist/.gitignore            |  8 +++++
+ server-dist/server.yaml           | 52 +++++++++++++++++++++++++++++++
+ server-dist/start.bat             | 36 +++++++++++++++++++++
+ soybean-admin/pnpm-workspace.yaml |  5 +++
+ 4 files changed, 101 insertions(+)
+ create mode 100644 server-dist/.gitignore
+ create mode 100644 server-dist/server.yaml
+ create mode 100644 server-dist/start.bat
+
+diff --git a/server-dist/.gitignore b/server-dist/.gitignore
+new file mode 100644
+index 0000000..c0bd3a7
+--- /dev/null
++++ b/server-dist/.gitignore
+@@ -0,0 +1,8 @@
++# Build outputs and runtime state, produced by build.py and by running the
++# server. Only the hand-written deployment files are tracked.
++rustdesk-api-server-pro.exe
++dist/
++data/
++server.db
++server.db-shm
++server.db-wal
+diff --git a/server-dist/server.yaml b/server-dist/server.yaml
+new file mode 100644
+index 0000000..4357325
+--- /dev/null
++++ b/server-dist/server.yaml
+@@ -0,0 +1,52 @@
++signKey: "CHANGE_ME_BEFORE_DEPLOY"
++debugMode: false # 生产环境建议保持 false
++db:
++  driver: "sqlite"
++  dsn: "./server.db"
++  timeZone: "Asia/Shanghai"
++  showSql: false
++
++httpConfig:
++  printRequestLog: true 
++  staticdir: "./dist" # 指向同目录下的管理后台前端构建产物
++  port: ":12345"
++
++smtpConfig:
++  host: "127.0.0.1"
++  port: 1025
++  username: ""
++  password: ""
++  encryption: "none"
++  from: "noreply@example.com"
++
++jobsConfig:
++  deviceCheckJob:
++    duration: 1
++    offlineAfterSeconds: 30
++
++oidc:
++  enabled: false
++  providerName: "oidc"
++  issuer: ""
++  clientId: ""
++  clientSecret: ""
++  redirectUrl: ""
++  scopes:
++    - "openid"
++    - "profile"
++    - "email"
++  bindByEmail: true
++  autoCreateAdmin: false
++  stateTtlSeconds: 180
++  ticketTtlSeconds: 180
++  successRedirect: "/login"
++  failureRedirect: "/login"
++  subjectClaim: "sub"
++  emailClaim: "email"
++  nameClaim: "name"
++  pictureClaim: "picture"
++  prompt: ""
++  allowedEmailDomains: []
++
++oauth:
++  providers: []
+diff --git a/server-dist/start.bat b/server-dist/start.bat
+new file mode 100644
+index 0000000..27992b7
+--- /dev/null
++++ b/server-dist/start.bat
+@@ -0,0 +1,36 @@
++@echo off
++REM RustDesk API Server Pro - Windows 本机部署启动脚本
++setlocal
++
++cd /d "%~dp0"
++
++REM 首次运行时若 server.yaml 仍是占位密钥，则生成随机 signKey
++if not exist "data\.signkey_set" (
++    echo [init] generating random signKey...
++)
++
++set ADMIN_USER=admin
++set ADMIN_PASS=admin123
++set PORT=12345
++set RUSTDESK_HBBS_DIR=
++
++REM 1) 同步数据库表结构
++rustdesk-api-server-pro.exe sync
++if errorlevel 1 (
++    echo [error] database sync failed
++    exit /b 1
++)
++
++REM 2) 首次创建管理员账号（已存在会报错，可忽略）
++if not exist "data\.init.lock" (
++    rustdesk-api-server-pro.exe user add %ADMIN_USER% %ADMIN_PASS% --admin
++    if errorlevel 1 (
++        echo [warn] admin user may already exist, continue
++    ) else (
++        echo created > "data\.init.lock"
++    )
++)
++
++REM 3) 启动服务
++echo [start] http://127.0.0.1:%PORT%  (admin / %ADMIN_PASS%)
++rustdesk-api-server-pro.exe start
+diff --git a/soybean-admin/pnpm-workspace.yaml b/soybean-admin/pnpm-workspace.yaml
+index dee51e9..cf493c9 100644
+--- a/soybean-admin/pnpm-workspace.yaml
++++ b/soybean-admin/pnpm-workspace.yaml
+@@ -1,2 +1,7 @@
+ packages:
+   - "packages/*"
++allowBuilds:
++  es5-ext: true
++  esbuild: true
++  simple-git-hooks: true
++  vue-demi: true
+-- 
+2.52.0.windows.1
+

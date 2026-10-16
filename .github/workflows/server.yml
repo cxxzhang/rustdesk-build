@@ -1,0 +1,69 @@
+# hbbs / hbbr / rustdesk-utils.
+#
+# Upstream rustdesk-server is cloned at the commit the patch was made against
+# and the patch is applied — no vendored copy to keep in sync.
+#
+# Native runners per platform: no cross-compilation, so no osxcross SDK and no
+# mingw toolchain to get right. That is the whole reason this runs on GitHub
+# rather than a Linux-only CI.
+name: server
+
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'patches/**', '.github/workflows/server.yml']
+  workflow_dispatch:
+
+env:
+  UPSTREAM_RUSTDESK_SERVER: rustdesk/rustdesk-server
+  UPSTREAM_RUSTDESK_SERVER_COMMIT: 873230e   # 1.1.17
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64,   os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { name: windows-x64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { name: macos-arm64, os: macos-latest,   target: aarch64-apple-darwin }
+          - { name: macos-x64,   os: macos-13,       target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream + apply patch
+        shell: bash
+        run: bash scripts/fetch.sh rustdesk-server
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/rustdesk-server
+
+      - name: Build
+        shell: bash
+        working-directory: src/rustdesk-server
+        run: cargo build --release --target ${{ matrix.target }} --bin hbbs --bin hbbr --bin rustdesk-utils
+
+      - name: Collect
+        shell: bash
+        run: |
+          OUT="src/rustdesk-server/target/${{ matrix.target }}/release"
+          mkdir -p dist
+          for f in hbbs hbbr rustdesk-utils; do
+            if [ -f "$OUT/$f" ]; then cp "$OUT/$f" dist/; fi
+            if [ -f "$OUT/$f.exe" ]; then cp "$OUT/$f.exe" dist/; fi
+          done
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-server-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
