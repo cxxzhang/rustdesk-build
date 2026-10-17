@@ -70,7 +70,11 @@ jobs:
             # backend-only and UI-only artifacts are build intermediates, not
             # things to download.
             case "$name" in
-              rustdesk-console-ui|rustdesk-console-*) continue ;;
+              # Drop the console build intermediates but keep the bundles
+              # (named rustdesk-console-bundle-<platform>).
+              rustdesk-console-ui) continue ;;
+              rustdesk-console-bundle-*) ;;
+              rustdesk-console-*) continue ;;
             esac
             ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}.zip" . )
           done
