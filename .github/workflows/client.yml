@@ -130,9 +130,12 @@ jobs:
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
+        # vcpkg manifest mode looks for vcpkg.json in the working directory.
+        # Upstream relies on this: its job root is the checkout, which holds
+        # vcpkg.json. Ours holds several sources, so cd into the right one.
+        working-directory: src/rustdesk
         run: |
           "$VCPKG_ROOT/vcpkg" install \
-            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
             --triplet x64-linux \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
@@ -177,9 +180,10 @@ jobs:
         shell: bash
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        # vcpkg manifest mode looks for vcpkg.json in the working directory.
+        working-directory: src/rustdesk
         run: |
           "$VCPKG_ROOT/vcpkg" install \
-            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
             --triplet x64-windows-static \
             --x-install-root="$VCPKG_ROOT/installed"
       - name: Point libsodium at vcpkg
@@ -233,9 +237,12 @@ jobs:
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
+        # vcpkg manifest mode looks for vcpkg.json in the working directory.
+        # Upstream relies on this: its job root is the checkout, which holds
+        # vcpkg.json. Ours holds several sources, so cd into the right one.
+        working-directory: src/rustdesk
         run: |
           "$VCPKG_ROOT/vcpkg" install \
-            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
             --triplet arm64-osx \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
@@ -298,9 +305,12 @@ jobs:
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
+        # vcpkg manifest mode looks for vcpkg.json in the working directory.
+        # Upstream relies on this: its job root is the checkout, which holds
+        # vcpkg.json. Ours holds several sources, so cd into the right one.
+        working-directory: src/rustdesk
         run: |
           "$VCPKG_ROOT/vcpkg" install \
-            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
             --triplet arm64-android \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
@@ -376,9 +386,12 @@ jobs:
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
+        # vcpkg manifest mode looks for vcpkg.json in the working directory.
+        # Upstream relies on this: its job root is the checkout, which holds
+        # vcpkg.json. Ours holds several sources, so cd into the right one.
+        working-directory: src/rustdesk
         run: |
           "$VCPKG_ROOT/vcpkg" install \
-            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
             --triplet arm64-ios \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
