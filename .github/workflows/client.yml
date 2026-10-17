@@ -225,8 +225,17 @@ jobs:
       - run: bash scripts/fetch.sh rustdesk
       - name: Prerequisites
         run: |
-          brew install llvm create-dmg pkg-config yasm
-          # NOT `brew install nasm` — that is NASM 3.x, which upstream avoids.
+          brew install llvm create-dmg
+          if command -v pkg-config &>/dev/null; then echo "pkg-config present"; else brew install pkg-config; fi
+      - name: Install NASM
+        run: |
+          # NASM 2.16.x from the official release, NOT `brew install nasm`:
+          # that is NASM 3.x, a rewrite with incompatible CLI options, and aom
+          # needs 2.x for its x86 assembly. This is upstream's own workaround.
+          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip -q nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
@@ -375,7 +384,13 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: brew install nasm yasm || true
+      - name: Install NASM
+        run: |
+          # Same 2.16.x requirement as the macOS job: brew's nasm is 3.x.
+          wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip
+          unzip -q nasm-2.16.03-macosx.zip
+          sudo cp nasm-2.16.03/nasm /usr/local/bin/nasm
+          nasm --version
       - run: bash scripts/fetch.sh rustdesk
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
