@@ -56,22 +56,19 @@ jobs:
         with:
           path: artifacts
 
-      - name: Flatten
+      - name: Package
         run: |
           mkdir -p release
-          # One directory per artifact, flattened into files named after it, so
-          # the same filename from two platforms cannot clobber the other.
+          # One archive per artifact. Uploading the raw trees produced 106
+          # assets — every Vue chunk and CSS map as its own release file —
+          # which is unusable. A zip per component keeps the release readable
+          # and the downloads whole.
           for d in artifacts/*/; do
             name="$(basename "$d")"
-            mkdir -p "release/$name"
-            cp -r "$d". "release/$name/" 2>/dev/null || true
+            [ -n "$(ls -A "$d")" ] || continue
+            ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}.zip" . )
           done
-          # Also a flat copy for convenience, keeping the artifact prefix.
-          find artifacts -type f | while read -r f; do
-            rel="${f#artifacts/}"
-            cp "$f" "release/${rel//\//__}"
-          done
-          ls -la release | head -40
+          ls -la release
           du -sh release
 
       - name: Create release
