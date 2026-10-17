@@ -27,12 +27,10 @@ jobs:
     uses: ./.github/workflows/web.yml
   console:
     uses: ./.github/workflows/console.yml
-  client:
-    uses: ./.github/workflows/client.yml
 
   publish:
     name: publish release
-    needs: [server, web, console, client]
+    needs: [server, web, console]
     # `always()` so a single flaky client platform does not withhold the
     # release: whatever built is worth shipping, and the gap is visible in the
     # run summary.
