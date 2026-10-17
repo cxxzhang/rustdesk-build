@@ -58,7 +58,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile || pnpm install
           pnpm build
-      - name: Package
+      - name: Package UI only
         run: |
           mkdir -p dist/api
           cp -r src/rustdesk-api-server-pro/soybean-admin/dist/. dist/api/
@@ -68,3 +68,50 @@ jobs:
         with:
           name: rustdesk-console-ui
           path: dist/
+
+  # Backend + admin UI in one directory per platform, so the download is a
+  # single archive that runs as-is: the binary reads server.yaml from its cwd
+  # and serves ./dist, which is exactly this layout.
+  bundle:
+    name: bundle ${{ matrix.suffix }}
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suffix: linux-amd64,        bin: rustdesk-api-server-linux-amd64,   name: rustdesk-api-server,   exe: '' }
+          - { suffix: linux-arm64,        bin: rustdesk-api-server-linux-arm64,   name: rustdesk-api-server,   exe: '' }
+          - { suffix: windows-amd64,      bin: rustdesk-api-server-windows-amd64.exe, name: rustdesk-api-server.exe, exe: '.exe' }
+          - { suffix: darwin-amd64,       bin: rustdesk-api-server-darwin-amd64,  name: rustdesk-api-server,   exe: '' }
+          - { suffix: darwin-arm64,       bin: rustdesk-api-server-darwin-arm64,  name: rustdesk-api-server,   exe: '' }
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-console-${{ matrix.suffix }}
+          path: in
+      - uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-console-ui
+          path: in
+      - name: Assemble
+        run: |
+          set -euo pipefail
+          out="out/rustdesk-console-${{ matrix.suffix }}"
+          mkdir -p "$out"
+          # The binary at the top level; server.yaml and dist/ beside it.
+          cp "in/${{ matrix.bin }}" "$out/${{ matrix.name }}"
+          chmod +x "$out/${{ matrix.name }}"
+          cp -r in/api/. "$out"/
+          ls -la "$out"
+          du -sh "$out"
+      - name: Zip
+        run: |
+          cd out
+          zip -qr "$GITHUB_WORKSPACE/rustdesk-console-${{ matrix.suffix }}.zip" .
+          ls -la "$GITHUB_WORKSPACE"/rustdesk-console-${{ matrix.suffix }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-console-bundle-${{ matrix.suffix }}
+          path: rustdesk-console-${{ matrix.suffix }}.zip
+          if-no-files-found: error

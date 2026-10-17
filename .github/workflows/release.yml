@@ -66,6 +66,12 @@ jobs:
           for d in artifacts/*/; do
             name="$(basename "$d")"
             [ -n "$(ls -A "$d")" ] || continue
+            # The console ships as one runnable bundle per platform; its
+            # backend-only and UI-only artifacts are build intermediates, not
+            # things to download.
+            case "$name" in
+              rustdesk-console-ui|rustdesk-console-*) continue ;;
+            esac
             ( cd "$d" && zip -qr "$GITHUB_WORKSPACE/release/${name}.zip" . )
           done
           ls -la release
