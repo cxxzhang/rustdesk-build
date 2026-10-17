@@ -226,10 +226,9 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
-          # somewhere git does not know, and the install dies with "pathspec
-          # .../vcpkg did not match any file(s) known to git".
-          vcpkgDirectory: /opt/artifacts/vcpkg
+          # No vcpkgDirectory on macOS: /opt/artifacts is a Linux path and
+          # mkdir fails with EACCES here. Upstream pins the directory only on
+          # Windows (C:\vcpkg) and Linux (/opt/artifacts/vcpkg).
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -371,10 +370,8 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
-          # somewhere git does not know, and the install dies with "pathspec
-          # .../vcpkg did not match any file(s) known to git".
-          vcpkgDirectory: /opt/artifacts/vcpkg
+          # No vcpkgDirectory on macOS/iOS: /opt/artifacts is a Linux path and
+          # mkdir fails with EACCES here.
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
