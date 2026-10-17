@@ -19,7 +19,7 @@ jobs:
         include:
           - { goos: linux,   goarch: amd64, suffix: linux-amd64 }
           - { goos: linux,   goarch: arm64, suffix: linux-arm64 }
-          - { goos: windows, goarch: amd64, suffix: windows-amd64.exe }
+          - { goos: windows, goarch: amd64, suffix: windows-amd64 }
           - { goos: darwin,  goarch: arm64, suffix: darwin-arm64 }
           - { goos: darwin,  goarch: amd64, suffix: darwin-amd64 }
     steps:
@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           go build -trimpath -ldflags "-s -w" \
-            -o "$GITHUB_WORKSPACE/dist/rustdesk-api-server-${{ matrix.suffix }}" .
+            -o "$GITHUB_WORKSPACE/dist/rustdesk-api-server-${{ matrix.suffix }}${{ matrix.goos == 'windows' && '.exe' || '' }}" .
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-console-${{ matrix.suffix }}
@@ -82,7 +82,7 @@ jobs:
         include:
           - { suffix: linux-amd64,        bin: rustdesk-api-server-linux-amd64,   name: rustdesk-api-server,   exe: '' }
           - { suffix: linux-arm64,        bin: rustdesk-api-server-linux-arm64,   name: rustdesk-api-server,   exe: '' }
-          - { suffix: windows-amd64,      bin: rustdesk-api-server-windows-amd64.exe, name: rustdesk-api-server.exe, exe: '.exe' }
+          - { suffix: windows-amd64,      bin: rustdesk-api-server-windows-amd64.exe, name: rustdesk-api-server.exe }
           - { suffix: darwin-amd64,       bin: rustdesk-api-server-darwin-amd64,  name: rustdesk-api-server,   exe: '' }
           - { suffix: darwin-arm64,       bin: rustdesk-api-server-darwin-arm64,  name: rustdesk-api-server,   exe: '' }
     steps:
