@@ -122,14 +122,18 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          # hwcodec/build.rs does env::var("VCPKG_ROOT").unwrap(), and the
-          # client links aom/libvpx/libyuv/ffmpeg/... from vcpkg.json.
+          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
+          # somewhere git does not know, and the install step dies with
+          # "pathspec .../vcpkg did not match any file(s) known to git".
+          vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet x64-linux \
+          "$VCPKG_ROOT/vcpkg" install \
+            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
+            --triplet x64-linux \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
@@ -166,6 +170,7 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
@@ -173,7 +178,9 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static \
+          "$VCPKG_ROOT/vcpkg" install \
+            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
+            --triplet x64-windows-static \
             --x-install-root="$VCPKG_ROOT/installed"
       - name: Point libsodium at vcpkg
         shell: bash
@@ -219,12 +226,18 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
+          # somewhere git does not know, and the install dies with "pathspec
+          # .../vcpkg did not match any file(s) known to git".
+          vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet arm64-osx \
+          "$VCPKG_ROOT/vcpkg" install \
+            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
+            --triplet arm64-osx \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
@@ -278,12 +291,18 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
+          # somewhere git does not know, and the install dies with "pathspec
+          # .../vcpkg did not match any file(s) known to git".
+          vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet arm64-android \
+          "$VCPKG_ROOT/vcpkg" install \
+            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
+            --triplet arm64-android \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
@@ -352,12 +371,18 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          # A fixed directory, as upstream uses. Without it VCPKG_ROOT points
+          # somewhere git does not know, and the install dies with "pathspec
+          # .../vcpkg did not match any file(s) known to git".
+          vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
           doNotCache: false
       - name: Install vcpkg dependencies
         shell: bash
         run: |
-          "$VCPKG_ROOT/vcpkg" install --triplet arm64-ios \
+          "$VCPKG_ROOT/vcpkg" install \
+            --manifest-root="$GITHUB_WORKSPACE/src/rustdesk" \
+            --triplet arm64-ios \
             --x-install-root="$VCPKG_ROOT/installed"
       - uses: actions/download-artifact@v4
         with: { name: bridge-artifact }
